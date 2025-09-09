@@ -1,0 +1,39 @@
+name: Build macOS pkg
+on: [push]
+
+jobs:
+  build-pkg:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # tu budujesz .app / pliki do instalacji
+      - name: Prepare payload
+        run: |
+          mkdir -p payload/Applications
+          cp -R path/to/Shutter EncoderA.app payload/Applications/
+
+      - name: Make component pkg
+        run: |
+          pkgbuild \
+            --root payload \
+            --install-location / \
+            --identifier com.example.myapp \
+            --version 1.0.0 \
+            MyApp.pkg
+
+      # (opcjonalnie) podpis
+      # - name: Sign installer
+      #   run: |
+      #     productsign --sign "Developer ID Installer: YOUR NAME (TEAMID)" MyApp.pkg MyApp-signed.pkg
+
+      # (opcjonalnie) notarization
+      # - name: Notarize
+      #   run: |
+      #     xcrun notarytool submit MyApp-signed.pkg --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_SPECIFIC_PW" --wait
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Shutter EncoderA.pkg
+          path: Shutter EncoderA*.pkg
