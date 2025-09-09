@@ -11,7 +11,7 @@ jobs:
       - name: Prepare payload
         run: |
           mkdir -p payload/Applications
-          cp -R path/to/Shutter EncoderA.app payload/Applications/
+          cp -R /Shutter_EncoderA.app payload/Applications/
 
       - name: Make component pkg
         run: |
