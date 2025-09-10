@@ -10,11 +10,9 @@ jobs:
     runs-on: macos-latest
 
     env:
-      APP_NAME: "Shutter Encoder Anatomia"
-      APP_VERSION: "19.4.0"                # ← podmień na swoją wersję
-      PKG_IDENTIFIER: "pl.dabek86.shutterencoder"  # ← podmień na swój reverse-DNS
-
-      # Logiczne przełączniki: włączą się, jeśli sekrety istnieją
+      APP_NAME: "Shutter Encoder Anatomia"              # Twoja nazwa app
+      APP_VERSION: "19.4.0"                             # ← podmień
+      PKG_IDENTIFIER: "pl.dabek86.shutterencoder"       # ← podmień
       SHOULD_SIGN: ${{ secrets.INSTALLER_CERT_P12 && secrets.INSTALLER_CERT_P12_PASSWORD && 'true' || 'false' }}
       CAN_NOTARIZE_API: ${{ secrets.NOTARY_API_KEY_ID && secrets.NOTARY_API_ISSUER && secrets.NOTARY_API_KEY && 'true' || 'false' }}
       CAN_NOTARIZE_APPLEID: ${{ secrets.APPLE_ID && secrets.TEAM_ID && secrets.APP_SPECIFIC_PW && 'true' || 'false' }}
@@ -23,35 +21,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Ensure scripts are executable (if present)
-        run: |
-          if [ -d scripts ]; then chmod +x scripts/* || true; fi
-
       - name: Install Temurin JDK (for jpackage)
         run: |
           brew update
           brew install --cask temurin
 
-      - name: Build .app with jpackage
+      - name: Build .app with jpackage (NO self-inclusion)
         run: |
+          set -euo pipefail
+          # 1) Czyścimy output
           rm -rf out && mkdir -p out
-          # Jeśli chcesz do .app wrzucić tylko Library/ i fonts/, przygotuj osobny katalog zasobów:
-          rm -rf res && mkdir -p res
-          [ -d Library ] && rsync -a Library res/ || true
-          [ -d fonts ] && rsync -a fonts res/ || true
 
-          # Uwaga: jpackage użyje Main-Class z MANIFEST w "Shutter Encoder.jar".
-          # Gdyby brakowało Main-Class, dodaj: --main-class fully.qualified.MainClass
+          # 2) Tworzymy staging tylko z JAR-em głównym
+          rm -rf stage && mkdir -p stage
+          cp "Shutter Encoder.jar" stage/
+
+          # 3) Zasoby do osobnego katalogu res/ (BEZ out/, .git itd.)
+          rm -rf res && mkdir -p res
+          # kopiujemy tylko to, co potrzebne
+          [ -d Library ] && rsync -a --delete --exclude '.DS_Store' Library/ res/Library/ || true
+          [ -d fonts ]   && rsync -a --delete --exclude '.DS_Store' fonts/   res/fonts/   || true
+          # UWAGA: Nie kopiujemy out/ do res/! (domyślnie go tu nie ma)
+
+          # 4) Generujemy app-image - input to WYŁĄCZNIE stage/
           jpackage \
             --type app-image \
             --name "${APP_NAME}" \
             --app-version "${APP_VERSION}" \
-            --input . \
+            --input stage \
             --main-jar "Shutter Encoder.jar" \
             --resource-dir res \
             --dest out
 
-          # out/Shutter Encoder.app będzie gotowe
+          # out/${APP_NAME}.app gotowe
 
       - name: Prepare payload
         run: |
@@ -82,15 +84,11 @@ jobs:
 
       - name: Build component package (pkgbuild)
         run: |
-          ARGS_SCRIPTS=""
-          if [ -d scripts ]; then ARGS_SCRIPTS="--scripts scripts"; fi
-
           pkgbuild \
             --root payload \
             --install-location / \
             --identifier "${PKG_IDENTIFIER}" \
             --version "${APP_VERSION}" \
-            $ARGS_SCRIPTS \
             "${APP_NAME}-unsigned.pkg"
 
       - name: Import Developer ID Installer certificate (optional)
@@ -107,8 +105,6 @@ jobs:
       - name: Sign installer (optional)
         if: env.SHOULD_SIGN == 'true'
         env:
-          # Podmień na dokładną nazwę z Keychain, np.:
-          # Developer ID Installer: Imię Nazwisko (TEAMID)
           INSTALLER_CN: "Developer ID Installer: YOUR NAME (TEAMID)"   # ← PODMIEŃ
         run: |
           productsign \
