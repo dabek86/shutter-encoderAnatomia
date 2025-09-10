@@ -1,39 +1,162 @@
-name: Build macOS pkg
-on: [push]
+name: Build macOS PKG
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   build-pkg:
     runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      # tu budujesz .app / pliki do instalacji
+    env:
+      APP_NAME: "Shutter Encoder Anatomia"
+      APP_VERSION: "19.4.0"                # ← podmień na swoją wersję
+      PKG_IDENTIFIER: "pl.dabek86.shutterencoder"  # ← podmień na swój reverse-DNS
+
+      # Logiczne przełączniki: włączą się, jeśli sekrety istnieją
+      SHOULD_SIGN: ${{ secrets.INSTALLER_CERT_P12 && secrets.INSTALLER_CERT_P12_PASSWORD && 'true' || 'false' }}
+      CAN_NOTARIZE_API: ${{ secrets.NOTARY_API_KEY_ID && secrets.NOTARY_API_ISSUER && secrets.NOTARY_API_KEY && 'true' || 'false' }}
+      CAN_NOTARIZE_APPLEID: ${{ secrets.APPLE_ID && secrets.TEAM_ID && secrets.APP_SPECIFIC_PW && 'true' || 'false' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure scripts are executable (if present)
+        run: |
+          if [ -d scripts ]; then chmod +x scripts/* || true; fi
+
+      - name: Install Temurin JDK (for jpackage)
+        run: |
+          brew update
+          brew install --cask temurin
+
+      - name: Build .app with jpackage
+        run: |
+          rm -rf out && mkdir -p out
+          # Jeśli chcesz do .app wrzucić tylko Library/ i fonts/, przygotuj osobny katalog zasobów:
+          rm -rf res && mkdir -p res
+          [ -d Library ] && rsync -a Library res/ || true
+          [ -d fonts ] && rsync -a fonts res/ || true
+
+          # Uwaga: jpackage użyje Main-Class z MANIFEST w "Shutter Encoder.jar".
+          # Gdyby brakowało Main-Class, dodaj: --main-class fully.qualified.MainClass
+          jpackage \
+            --type app-image \
+            --name "${APP_NAME}" \
+            --app-version "${APP_VERSION}" \
+            --input . \
+            --main-jar "Shutter Encoder.jar" \
+            --resource-dir res \
+            --dest out
+
+          # out/Shutter Encoder.app będzie gotowe
+
       - name: Prepare payload
         run: |
-          mkdir -p payload/Applications
-          cp -R /Shutter_EncoderA.app payload/Applications/
+          mkdir -p "payload/Applications"
+          cp -R "out/${APP_NAME}.app" "payload/Applications/${APP_NAME}.app"
 
-      - name: Make component pkg
+      - name: Compute payload stats
+        id: stats
         run: |
+          FILES=$(find payload -type f | wc -l | tr -d ' ')
+          KBYTES=$(du -sk payload | awk '{print $1}')
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+          echo "kbytes=$KBYTES" >> $GITHUB_OUTPUT
+
+      - name: Create PackageInfo (minimal)
+        run: |
+          cat > PackageInfo <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <pkg-info format-version="2"
+            identifier="${PKG_IDENTIFIER}"
+            version="${APP_VERSION}"
+            install-location="/"
+            auth="root">
+            <payload installKBytes="${{ steps.stats.outputs.kbytes }}" numberOfFiles="${{ steps.stats.outputs.files }}"/>
+            <scripts/>
+          </pkg-info>
+          EOF
+
+      - name: Build component package (pkgbuild)
+        run: |
+          ARGS_SCRIPTS=""
+          if [ -d scripts ]; then ARGS_SCRIPTS="--scripts scripts"; fi
+
           pkgbuild \
             --root payload \
             --install-location / \
-            --identifier com.example.myapp \
-            --version 1.0.0 \
-            MyApp.pkg
+            --identifier "${PKG_IDENTIFIER}" \
+            --version "${APP_VERSION}" \
+            $ARGS_SCRIPTS \
+            "${APP_NAME}-unsigned.pkg"
 
-      # (opcjonalnie) podpis
-      # - name: Sign installer
-      #   run: |
-      #     productsign --sign "Developer ID Installer: YOUR NAME (TEAMID)" MyApp.pkg MyApp-signed.pkg
+      - name: Import Developer ID Installer certificate (optional)
+        if: env.SHOULD_SIGN == 'true'
+        run: |
+          echo "${{ secrets.INSTALLER_CERT_P12 }}" | base64 --decode > installer.p12
+          security create-keychain -p temp build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p temp build.keychain
+          security import installer.p12 -k build.keychain -P "${{ secrets.INSTALLER_CERT_P12_PASSWORD }}" -T /usr/bin/productsign -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k temp build.keychain
+          rm -f installer.p12
 
-      # (opcjonalnie) notarization
-      # - name: Notarize
-      #   run: |
-      #     xcrun notarytool submit MyApp-signed.pkg --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_SPECIFIC_PW" --wait
+      - name: Sign installer (optional)
+        if: env.SHOULD_SIGN == 'true'
+        env:
+          # Podmień na dokładną nazwę z Keychain, np.:
+          # Developer ID Installer: Imię Nazwisko (TEAMID)
+          INSTALLER_CN: "Developer ID Installer: YOUR NAME (TEAMID)"   # ← PODMIEŃ
+        run: |
+          productsign \
+            --sign "${INSTALLER_CN}" \
+            "${APP_NAME}-unsigned.pkg" \
+            "${APP_NAME}-signed.pkg"
+
+      - name: Notarize with notarytool (API key) (optional)
+        if: env.CAN_NOTARIZE_API == 'true'
+        env:
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER: ${{ secrets.NOTARY_API_ISSUER }}
+          NOTARY_API_KEY: ${{ secrets.NOTARY_API_KEY }}
+        run: |
+          echo "$NOTARY_API_KEY" > api_key.p8
+          xcrun notarytool submit "$([ -f "${APP_NAME}-signed.pkg" ] && echo "${APP_NAME}-signed.pkg" || echo "${APP_NAME}-unsigned.pkg")" \
+            --key api_key.p8 \
+            --key-id "$NOTARY_API_KEY_ID" \
+            --issuer "$NOTARY_API_ISSUER" \
+            --wait
+          rm -f api_key.p8
+
+      - name: Notarize with notarytool (Apple ID) (optional)
+        if: env.CAN_NOTARIZE_APPLEID == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          APP_SPECIFIC_PW: ${{ secrets.APP_SPECIFIC_PW }}
+        run: |
+          xcrun notarytool submit "$([ -f "${APP_NAME}-signed.pkg" ] && echo "${APP_NAME}-signed.pkg" || echo "${APP_NAME}-unsigned.pkg")" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$TEAM_ID" \
+            --password "$APP_SPECIFIC_PW" \
+            --wait
+
+      - name: Staple (optional)
+        run: |
+          PKG="$([ -f "${APP_NAME}-signed.pkg" ] && echo "${APP_NAME}-signed.pkg" || echo "${APP_NAME}-unsigned.pkg")"
+          xcrun stapler staple "$PKG" || true
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p dist
+          PKG="$([ -f "${APP_NAME}-signed.pkg" ] && echo "${APP_NAME}-signed.pkg" || echo "${APP_NAME}-unsigned.pkg")"
+          mv "$PKG" "dist/${APP_NAME}-${APP_VERSION}.pkg"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Shutter EncoderA.pkg
-          path: Shutter EncoderA*.pkg
+          name: pkg
+          path: dist/*.pkg
