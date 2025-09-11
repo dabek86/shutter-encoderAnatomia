@@ -1,4 +1,159 @@
+name: Build macOS PKG (embedded JRE + external tools)
+
+on:
+  push:
+    branches: ["master"]
+  workflow_dispatch:
+
+jobs:
+  build-pkg:
+    runs-on: macos-latest
+
+    env:
+      APP_NAME: "Shutter Encoder Anatomia"
+      APP_VERSION: "19.4.0"
+      PKG_IDENTIFIER: "pl.dabek86.shutterencoder"
+      SHOULD_SIGN: ${{ secrets.INSTALLER_CERT_P12 && secrets.INSTALLER_CERT_P12_PASSWORD && 'true' || 'false' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare toolchain
+        run: |
+          set -euo pipefail
+          brew update
+          brew install --cask temurin || true
+
+          # Instaluj tylko brakujące formuły
+          need_install() { brew list --versions "$1" >/dev/null 2>&1 || brew install "$1"; }
+
+          need_install jq
+          need_install coreutils
+          need_install rsync
+          need_install ninja
+          need_install pkg-config
+          need_install autoconf
+          need_install automake
+          need_install libtool
+          need_install expat
+          need_install uriparser
+
+          # cmake może być z innego tappa – użyj istniejącej instalacji
+          if ! command -v cmake >/dev/null 2>&1; then
+            brew install cmake
+          else
+            echo "cmake already present: $(cmake --version | head -n1)"
+          fi
+
+      - name: Download external CLI tools (robust)
+        run: |
+          set -euo pipefail
+          mkdir -p downloads tools
+
+          require_zip () { local f="$1"; file "$f" | grep -qi 'Zip archive' || { echo "ERROR: $f nie jest ZIP-em"; exit 1; }; }
+
+          unzip_first_exec () {
+            local zip="$1" outdir="$2" pattern="$3" outname="$4"
+            require_zip "$zip"
+            rm -rf "$outdir"; mkdir -p "$outdir"
+            ditto -x -k "$zip" "$outdir"
+            local bin
+            bin=$(find "$outdir" -type f -perm +111 -iname "$pattern" 2>/dev/null | head -n1 || true)
+            if [ -z "${bin:-}" ]; then
+              bin=$(find "$outdir" -type f -iname "$pattern" 2>/dev/null | head -n1 || true)
+              [ -n "${bin:-}" ] && chmod +x "$bin"
+            fi
+            [ -n "${bin:-}" ] || { echo "Nie znaleziono $pattern w $zip"; exit 1; }
+            cp "$bin" "tools/$outname"
+            chmod +x "tools/$outname"
+          }
+
+          echo ">> FFmpeg (Evermeet)"
+          curl -sSL "https://evermeet.cx/ffmpeg/get/zip" -o downloads/ffmpeg.zip
+          require_zip downloads/ffmpeg.zip
+          unzip_first_exec downloads/ffmpeg.zip downloads/ffmpeg ffmpeg ffmpeg
+
+          echo ">> yt-dlp"
+          curl -sSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" -o tools/yt-dlp
+          chmod +x tools/yt-dlp
+
+          echo ">> 7za (7-zip.org → 7zz)"
+          mkdir -p downloads/7zip
+          for URL in \
+            "https://www.7-zip.org/a/7z2408-mac.tar.xz" \
+            "https://www.7-zip.org/a/7z2301-mac.tar.xz"
+          do
+            curl -fsSL "$URL" -o downloads/7zip.tar.xz || true
+            file downloads/7zip.tar.xz | grep -qi 'XZ compressed data' && break
+          done
+          file downloads/7zip.tar.xz | grep -qi 'XZ compressed data' || { echo "ERROR: 7zip tar.xz invalid"; exit 1; }
+          tar -xJf downloads/7zip.tar.xz -C downloads/7zip
+          [ -f downloads/7zip/7zz ] || { echo "ERROR: 7zz not found"; exit 1; }
+          cp downloads/7zip/7zz tools/7za && chmod +x tools/7za
+
+          echo ">> dcraw"
+          curl -sSL "https://raw.githubusercontent.com/entz/dcraw-mac/master/dcraw" -o tools/dcraw
+          chmod +x tools/dcraw
+
+          echo ">> exiftool (auto-version)"
+          EXIF_VER=$(curl -fsSL "https://exiftool.org/ver.txt" | tr -d '\r' || true)
+          EXIF_TGZ=""
+          if [ -n "${EXIF_VER:-}" ]; then
+            for C in \
+              "https://exiftool.org/Image-ExifTool-${EXIF_VER}.tar.gz" \
+              "https://downloads.sourceforge.net/project/exiftool/Image-ExifTool-${EXIF_VER}.tar.gz"
+            do
+              curl -fsSL "$C" -o downloads/exiftool.tar.gz || true
+              file downloads/exiftool.tar.gz | grep -qi 'gzip compressed data' && EXIF_TGZ="downloads/exiftool.tar.gz" && break
+            done
+          fi
+          if [ -z "$EXIF_TGZ" ]; then
+            EXIF_API="https://api.github.com/repos/exiftool/exiftool/releases/latest"
+            GH_TGZ=$(curl -sSL "$EXIF_API" | jq -r '.assets[]?.browser_download_url | select(endswith(".tar.gz"))' | head -n1)
+            [ -n "$GH_TGZ" ] || { echo "ERROR: exiftool .tar.gz not found"; exit 1; }
+            curl -fsSL "$GH_TGZ" -o downloads/exiftool.tar.gz
+            file downloads/exiftool.tar.gz | grep -qi 'gzip compressed data' || { echo "ERROR: exiftool tar.gz invalid"; exit 1; }
+            EXIF_TGZ="downloads/exiftool.tar.gz"
+          fi
+          mkdir -p downloads/exiftool
+          tar -xzf "$EXIF_TGZ" -C downloads/exiftool --strip-components=1
+          cp downloads/exiftool/exiftool tools/exiftool && chmod +x tools/exiftool
+          if [ -d downloads/exiftool/lib ]; then mkdir -p tools/lib && rsync -a downloads/exiftool/lib/ tools/lib/; fi
+
+          echo ">> dvdauthor (Homebrew)"
+          if brew list dvdauthor >/dev/null 2>&1 || brew install dvdauthor; then
+            BIN="$(brew --prefix)/bin/dvdauthor"; [ -x "$BIN" ] || { echo "ERROR: dvdauthor not found after brew install"; exit 1; }
+            cp "$BIN" tools/dvdauthor && chmod +x tools/dvdauthor
+          else
+            echo "ERROR: brew install dvdauthor failed"; exit 1
+          fi
+
+          echo ">> Real-ESRGAN ncnn Vulkan"
+          RG_API="https://api.github.com/repos/xinntao/Real-ESRGAN-ncnn-vulkan/releases/latest"
+          RG_URL=$(curl -sSL "$RG_API" | jq -r '.assets[]?.browser_download_url | select(test("mac|osx";"i")) | select(endswith(".zip"))' | head -n1)
+          [ -n "$RG_URL" ] || RG_URL="https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases/download/v0.2.0/realesrgan-ncnn-vulkan-v0.2.0-macos.zip"
+          curl -sSL "$RG_URL" -o downloads/realesrgan.zip
+          require_zip downloads/realesrgan.zip
+          rm -rf downloads/realesrgan; mkdir -p downloads/realesrgan
+          ditto -x -k downloads/realesrgan.zip downloads/realesrgan
+          BIN_RG=$(find downloads/realesrgan -type f -perm +111 -name "realesrgan-ncnn-vulkan" 2>/dev/null | head -n1 || true)
+          [ -n "${BIN_RG:-}" ] || { echo "Nie znaleziono binarki realesrgan-ncnn-vulkan"; exit 1; }
+          cp "$BIN_RG" tools/realesrgan-ncnn-vulkan && chmod +x tools/realesrgan-ncnn-vulkan
+          if [ -d "downloads/realesrgan/models" ]; then mkdir -p tools/realesrgan-models; cp -R downloads/realesrgan/models/* tools/realesrgan-models/ || true; fi
+
+          echo ">> MediaInfo (Homebrew)"
+          if ! command -v mediainfo >/dev/null 2>&1; then
+            brew install mediainfo
+          fi
+          BIN="$(brew --prefix)/bin/mediainfo"
+          [ -x "$BIN" ] || { echo "ERROR: mediainfo binary not found after brew install"; exit 1; }
+          cp "$BIN" tools/mediainfo
+          chmod +x tools/mediainfo
+
       - name: Get tsMuxer (robust: GitHub API with token + source build fallback)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p downloads tools
@@ -17,7 +172,6 @@
           }
 
           pick_asset_from_object() {
-            # stdin: JSON object z polem assets
             jq -r '
               (.assets // [])[]?.browser_download_url
               | select(test("(?i)(mac|macos|osx|darwin)"))
@@ -26,7 +180,6 @@
           }
 
           pick_asset_from_array() {
-            # stdin: JSON array z obiektami wydań
             jq -r '
               [ .[]? | (.assets // [])[]?.browser_download_url ] 
               | map(select(test("(?i)(mac|macos|osx|darwin)")))
@@ -38,13 +191,11 @@
           echo ">> tsMuxer: szukam assetu macOS przez GitHub API"
           TS_URL=""
 
-          # 1) releases/latest (obiekt)
           gh_curl "https://api.github.com/repos/justdan96/tsMuxer/releases/latest" > downloads/tsmuxer_latest.json || true
           if jq -e 'type=="object" and has("assets")' downloads/tsmuxer_latest.json >/dev/null 2>&1; then
             TS_URL=$(pick_asset_from_object < downloads/tsmuxer_latest.json || true)
           fi
 
-          # 2) jeśli brak, lista wydań (tablica)
           if [ -z "${TS_URL:-}" ]; then
             gh_curl "https://api.github.com/repos/justdan96/tsMuxer/releases?per_page=10" > downloads/tsmuxer_releases.json || true
             if jq -e 'type=="array"' downloads/tsmuxer_releases.json >/dev/null 2>&1; then
@@ -74,10 +225,8 @@
               MNT=$(mktemp -d)
               if hdiutil attach downloads/tsmuxer.dmg -mountpoint "$MNT" -nobrowse -quiet; then
                 CAND=$(find "$MNT" -type f -perm +111 \( -iname "tsmuxer" -o -iname "tsMuxeR" \) | head -n1 || true)
-                if [ -z "${CAND:-}" ]; then
-                  CAND=$(find "$MNT" -type f \( -iname "tsmuxer" -o -iname "tsMuxeR" \) | head -n1 || true)
-                fi
-                if [ -n "${CAND:-}" ]; then
+                [ -z "${CAND:-}" ] && CAND=$(find "$MNT" -type f \( -iname "tsmuxer" -o -iname "tsMuxeR" \) | head -n1 || true)
+                if [ -n "${CAND:-}" ] ; then
                   cp "$CAND" tools/tsmuxer
                   chmod +x tools/tsmuxer
                   hdiutil detach "$MNT" -quiet || true
@@ -106,7 +255,7 @@
           rm -rf downloads/tsmuxer-src downloads/tsmuxer-build
           git clone --depth=1 https://github.com/justdan96/tsMuxer.git downloads/tsmuxer-src
 
-          # CMake: ustaw polityki, żeby przejść komunikat o <3.5
+          # CMake: polityki, żeby przejść komunikat o <3.5
           cmake -S downloads/tsmuxer-src -B downloads/tsmuxer-build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5
@@ -117,3 +266,82 @@
           [ -n "${BIN:-}" ] || { echo "Nie udało się zbudować tsMuxer"; exit 1; }
           cp "$BIN" tools/tsmuxer && chmod +x tools/tsmuxer
           echo "tsMuxer zbudowany ze źródeł"
+
+      - name: Get bmxtranswrap (build from BBC repo)
+        run: |
+          set -euo pipefail
+          mkdir -p downloads tools
+
+          echo ">> bbc/bmx (build)"
+          rm -rf downloads/bmx-src downloads/bmx-build
+          git clone --depth=1 https://github.com/bbc/bmx.git downloads/bmx-src
+
+          # pkg-config widzi Homebrew’owe .pc (uriparser, expat)
+          export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+          cmake -S downloads/bmx-src -B downloads/bmx-build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          ninja -C downloads/bmx-build
+
+          BIN=$( (find downloads/bmx-build -type f -perm +111 -name "bmxtranswrap" 2>/dev/null || true) | head -n1 )
+          [ -n "${BIN:-}" ] || { echo "Nie znaleziono bmxtranswrap po buildzie"; exit 1; }
+
+          cp "$BIN" tools/bmxtranswrap
+          chmod +x tools/bmxtranswrap
+          echo "bmxtranswrap gotowy"
+
+      - name: Build .app with jpackage + custom JRE + tools
+        run: |
+          set -euo pipefail
+          rm -rf out stage res JRE
+          mkdir -p out stage res
+
+          cp "Shutter Encoder.jar" stage/
+          [ -d Library ] && rsync -a Library/ res/Library/ || true
+          [ -d fonts ] && rsync -a fonts/ res/fonts/ || true
+
+          mkdir -p res/bin
+          rsync -a tools/ res/bin/
+
+          jlink \
+            --compress 0 \
+            --strip-debug \
+            --no-header-files \
+            --no-man-pages \
+            --add-modules java.base,java.datatransfer,java.desktop,java.logging,java.security.sasl,java.xml,jdk.crypto.ec \
+            --output JRE
+
+          jpackage \
+            --type app-image \
+            --name "${APP_NAME}" \
+            --app-version "${APP_VERSION}" \
+            --input stage \
+            --main-jar "Shutter Encoder.jar" \
+            --resource-dir res \
+            --runtime-image JRE \
+            --dest out
+
+          mkdir -p "out/${APP_NAME}.app/Contents/Resources/bin"
+          cp -R "res/bin/." "out/${APP_NAME}.app/Contents/Resources/bin/"
+          if [ -d "tools/realesrgan-models" ]; then
+            mkdir -p "out/${APP_NAME}.app/Contents/Resources/realesrgan-models"
+            cp -R "tools/realesrgan-models/." "out/${APP_NAME}.app/Contents/Resources/realesrgan-models/"
+          fi
+
+      - name: Package .pkg
+        run: |
+          set -euo pipefail
+          mkdir -p "payload/Applications"
+          cp -R "out/${APP_NAME}.app" "payload/Applications/${APP_NAME}.app"
+
+          pkgbuild \
+            --root payload \
+            --install-location / \
+            --identifier "${PKG_IDENTIFIER}" \
+            --version "${APP_VERSION}" \
+            "${APP_NAME}-unsigned.pkg"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-${{ env.APP_VERSION }}
+          path: "${{ env.APP_NAME }}-unsigned.pkg"
