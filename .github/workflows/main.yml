@@ -25,15 +25,20 @@ jobs:
           brew update
           brew install --cask temurin || true
 
-          # Instaluj tylko brakujące formuły/caski
+          # instaluj tylko brakujące formuły
           need_install() { brew list --versions "$1" >/dev/null 2>&1 || brew install "$1"; }
 
           need_install jq
           need_install coreutils
           need_install rsync
           need_install ninja
+          need_install pkg-config
+          need_install autoconf
+          need_install automake
+          need_install libtool
+          need_install expat
 
-          # cmake może być z innego tappa – użyj istniejącej instalacji
+          # cmake bywa już w innym tapie – użyj istniejącego
           if ! command -v cmake >/dev/null 2>&1; then
             brew install cmake
           else
@@ -123,10 +128,6 @@ jobs:
             echo "ERROR: brew install dvdauthor failed"; exit 1
           fi
 
-          echo ">> bmxtranswrap"
-          curl -sSL "https://downloads.sourceforge.net/project/bmxlib/bmx/bmx-0.2.4/bmx-0.2.4-macosx.zip" -o downloads/bmx.zip
-          unzip_first_exec downloads/bmx.zip downloads/bmx bmxtranswrap bmxtranswrap
-
           echo ">> Real-ESRGAN ncnn Vulkan"
           RG_API="https://api.github.com/repos/xinntao/Real-ESRGAN-ncnn-vulkan/releases/latest"
           RG_URL=$(curl -sSL "$RG_API" | jq -r '.assets[]?.browser_download_url | select(test("mac|osx";"i")) | select(endswith(".zip"))' | head -n1)
@@ -167,8 +168,7 @@ jobs:
                 | first // empty
               ' downloads/tsmuxer_releases.json)
               if [ -n "$url" ] && [ "$url" != "null" ]; then
-                echo "$url"
-                return 0
+                echo "$url"; return 0
               fi
               page=$((page+1))
             done
@@ -208,6 +208,75 @@ jobs:
             [ -n "${BIN:-}" ] || { echo "Nie udało się zbudować tsMuxer"; exit 1; }
             cp "$BIN" tools/tsmuxer && chmod +x tools/tsmuxer
           fi
+
+      - name: Get bmxtranswrap (ZIP from SF mirrors or build from source)
+        run: |
+          set -euo pipefail
+          mkdir -p downloads tools
+
+          echo ">> bmxtranswrap"
+          BMX_REL="project/bmxlib/bmx/bmx-0.2.4/bmx-0.2.4-macosx.zip"
+          OUT="downloads/bmx.zip"
+          mirrors=(
+            "downloads.sourceforge.net"
+            "pilotfiber.dl.sourceforge.net"
+            "netactuate.dl.sourceforge.net"
+            "phoenixnap.dl.sourceforge.net"
+            "versaweb.dl.sourceforge.net"
+            "gigenet.dl.sourceforge.net"
+            "ayera.dl.sourceforge.net"
+            "kumisystems.dl.sourceforge.net"
+          )
+          got_zip="false"
+          for m in "${mirrors[@]}"; do
+            URL="https://${m}/${BMX_REL}"
+            echo "  próbuję: $URL"
+            curl -fsSL "$URL" -o "$OUT" || true
+            if [ -f "$OUT" ] && file "$OUT" | grep -qi 'Zip archive'; then
+              echo "  OK z: $m"
+              got_zip="true"
+              break
+            else
+              rm -f "$OUT"
+            fi
+          done
+
+          if [ "$got_zip" = "true" ]; then
+            rm -rf downloads/bmx
+            mkdir -p downloads/bmx
+            ditto -x -k "$OUT" downloads/bmx
+            CAND=$(find downloads/bmx -type f -perm +111 -name "bmxtranswrap" 2>/dev/null | head -n1 || true)
+            if [ -z "${CAND:-}" ]; then
+              CAND=$(find downloads/bmx -type f -name "bmxtranswrap" 2>/dev/null | head -n1 || true)
+              [ -n "${CAND:-}" ] && chmod +x "$CAND"
+            fi
+            [ -n "${CAND:-}" ] || { echo "Nie znaleziono bmxtranswrap w ZIP — przechodzę do builda ze źródeł"; got_zip="false"; }
+            if [ "$got_zip" = "true" ]; then
+              cp "$CAND" tools/bmxtranswrap
+              chmod +x tools/bmxtranswrap
+              exit 0
+            fi
+          fi
+
+          echo "Buduję bmx ze źródeł…"
+          rm -rf downloads/bmx-src downloads/bmx-build
+          # spróbuj najpierw SF git, potem GitHub mirror (jeśli jest)
+          if ! git clone --depth=1 https://git.code.sf.net/p/bmxlib/code downloads/bmx-src; then
+            git clone --depth=1 https://github.com/bmx-team/bmx downloads/bmx-src || true
+          fi
+          [ -d downloads/bmx-src ] || { echo "Nie udało się sklonować źródeł bmx"; exit 1; }
+
+          if [ -f downloads/bmx-src/CMakeLists.txt ]; then
+            cmake -S downloads/bmx-src -B downloads/bmx-build -G Ninja -DCMAKE_BUILD_TYPE=Release
+            ninja -C downloads/bmx-build
+          else
+            (cd downloads/bmx-src && (./bootstrap || true) && (./configure || true) && make -j2 || true)
+          fi
+
+          BIN=$( (find downloads/bmx-build downloads/bmx-src -type f -perm +111 -name "bmxtranswrap" 2>/dev/null || true) | head -n1 )
+          [ -n "${BIN:-}" ] || { echo "Nie udało się pozyskać bmxtranswrap"; exit 1; }
+          cp "$BIN" tools/bmxtranswrap
+          chmod +x tools/bmxtranswrap
 
       - name: Build .app with jpackage + custom JRE + tools
         run: |
