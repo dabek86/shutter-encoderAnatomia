@@ -102,14 +102,12 @@ jobs:
 
           EXIF_TGZ=""
           if [ -n "${EXIF_VER:-}" ]; then
-            # 1) exiftool.org
             CAND1="https://exiftool.org/Image-ExifTool-${EXIF_VER}.tar.gz"
             echo "Próba: $CAND1"
             curl -fsSL "$CAND1" -o downloads/exiftool.tar.gz || true
             if file downloads/exiftool.tar.gz | grep -qi 'gzip compressed data'; then
               EXIF_TGZ="downloads/exiftool.tar.gz"
             else
-              # 2) SourceForge mirror tej samej wersji
               CAND2="https://downloads.sourceforge.net/project/exiftool/Image-ExifTool-${EXIF_VER}.tar.gz"
               echo "Próba: $CAND2"
               curl -fsSL "$CAND2" -o downloads/exiftool.tar.gz || true
@@ -120,7 +118,6 @@ jobs:
           fi
 
           if [ -z "$EXIF_TGZ" ]; then
-            # 3) GitHub Releases: weź pierwszy .tar.gz asset
             EXIF_API="https://api.github.com/repos/exiftool/exiftool/releases/latest"
             GH_TGZ=$(curl -sSL "$EXIF_API" | jq -r '.assets[]?.browser_download_url | select(endswith(".tar.gz"))' | head -n1)
             [ -n "$GH_TGZ" ] || { echo "ERROR: brak assetów exiftool (.tar.gz) w GitHub Releases"; exit 1; }
@@ -131,7 +128,6 @@ jobs:
 
           mkdir -p downloads/exiftool
           tar -xzf "$EXIF_TGZ" -C downloads/exiftool --strip-components=1
-          # skrypt + cały katalog lib (Perl) → obok binarek CLI
           cp downloads/exiftool/exiftool tools/exiftool
           chmod +x tools/exiftool
           if [ -d downloads/exiftool/lib ]; then
@@ -139,10 +135,36 @@ jobs:
             rsync -a downloads/exiftool/lib/ tools/lib/
           fi
 
-          # ---------- dvdauthor ----------
+          # ---------- dvdauthor (SourceForge: wielomirrorowe pobieranie) ----------
           echo ">> dvdauthor"
-          curl -sSL "https://downloads.sourceforge.net/project/dvdauthor/dvdauthor/0.7.2/dvdauthor-0.7.2-macos.zip" -o downloads/dvdauthor.zip
-          unzip_first_exec downloads/dvdauthor.zip downloads/dvdauthor dvdauthor dvdauthor
+          DV_REL_PATH="project/dvdauthor/dvdauthor/0.7.2/dvdauthor-0.7.2-macos.zip"
+          DV_OUT="downloads/dvdauthor.zip"
+          # lista mirrorów SF, próbujemy po kolei aż trafi ZIP
+          mirrors=(
+            "downloads.sourceforge.net"
+            "pilotfiber.dl.sourceforge.net"
+            "netactuate.dl.sourceforge.net"
+            "phoenixnap.dl.sourceforge.net"
+            "versaweb.dl.sourceforge.net"
+            "managedway.dl.sourceforge.net"
+            "gigenet.dl.sourceforge.net"
+            "ayera.dl.sourceforge.net"
+            "kumisystems.dl.sourceforge.net"
+          )
+          rm -f "$DV_OUT"
+          for m in "${mirrors[@]}"; do
+            URL="https://${m}/${DV_REL_PATH}"
+            echo "  próbuję: $URL"
+            curl -fsSL "$URL" -o "$DV_OUT" || true
+            if [ -f "$DV_OUT" ] && file "$DV_OUT" | grep -qi 'Zip archive'; then
+              echo "  OK z: $m"
+              break
+            else
+              rm -f "$DV_OUT"
+            fi
+          done
+          [ -f "$DV_OUT" ] || { echo "ERROR: nie udało się pobrać dvdauthor z żadnego mirrora"; exit 1; }
+          unzip_first_exec "$DV_OUT" downloads/dvdauthor dvdauthor dvdauthor
 
           # ---------- tsMuxer ----------
           echo ">> tsMuxer"
