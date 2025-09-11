@@ -11,8 +11,8 @@ jobs:
 
     env:
       APP_NAME: "Shutter Encoder Anatomia"
-      APP_VERSION: "19.4.0"                       # ← PODMIEŃ jeśli potrzeba
-      PKG_IDENTIFIER: "pl.dabek86.shutterencoder" # ← PODMIEŃ jeśli potrzeba
+      APP_VERSION: "19.4.0"
+      PKG_IDENTIFIER: "pl.dabek86.shutterencoder"
       SHOULD_SIGN: ${{ secrets.INSTALLER_CERT_P12 && secrets.INSTALLER_CERT_P12_PASSWORD && 'true' || 'false' }}
 
     steps:
@@ -23,8 +23,22 @@ jobs:
         run: |
           set -euo pipefail
           brew update
-          brew install --cask temurin
-          brew install jq coreutils cmake ninja rsync
+          brew install --cask temurin || true
+
+          # Instaluj tylko brakujące formuły/caski
+          need_install() { brew list --versions "$1" >/dev/null 2>&1 || brew install "$1"; }
+
+          need_install jq
+          need_install coreutils
+          need_install rsync
+          need_install ninja
+
+          # cmake może być z innego tappa – użyj istniejącej instalacji
+          if ! command -v cmake >/dev/null 2>&1; then
+            brew install cmake
+          else
+            echo "cmake already present: $(cmake --version | head -n1)"
+          fi
 
       - name: Download external CLI tools (robust)
         run: |
