@@ -56,7 +56,7 @@ jobs:
             chmod +x "tools/$outname"
           }
 
-          # ---------- FFmpeg (Evermeet) ----------
+          # ---------- FFmpeg (Evermeet: stabilne ZIP/API) ----------
           echo ">> FFmpeg (Evermeet)"
           curl -sSL "https://evermeet.cx/ffmpeg/get/zip" -o downloads/ffmpeg.zip
           require_zip downloads/ffmpeg.zip
@@ -90,25 +90,54 @@ jobs:
           curl -sSL "https://raw.githubusercontent.com/entz/dcraw-mac/master/dcraw" -o tools/dcraw
           chmod +x tools/dcraw
 
-          # ---------- exiftool (tar.gz z exiftool.org z fallbackiem na SourceForge) ----------
+          # ---------- exiftool (auto-version via ver.txt → SF → GitHub fallback) ----------
           echo ">> exiftool"
-          EXIF_TGZ="downloads/exiftool.tar.gz"
-          curl -fsSL "https://exiftool.org/Image-ExifTool-12.76.tar.gz" -o "$EXIF_TGZ" || true
-          if ! file "$EXIF_TGZ" | grep -qi 'gzip compressed data'; then
-            echo "Primary exiftool URL failed, trying SourceForge…"
-            curl -fsSL "https://downloads.sourceforge.net/project/exiftool/Image-ExifTool-12.76.tar.gz" -o "$EXIF_TGZ"
+          EXIF_VER=$(curl -fsSL "https://exiftool.org/ver.txt" | tr -d '\r' || true)
+          if [ -z "${EXIF_VER:-}" ]; then
+            # awaryjnie spróbuj wyciągnąć nazwę z HTML
+            EXIF_VER=$(curl -fsSL "https://exiftool.org/" | grep -Eo 'Image-ExifTool-[0-9]+\.[0-9]+\.tar\.gz' | head -n1 | sed -E 's/.*Image-ExifTool-([0-9]+\.[0-9]+)\.tar\.gz/\1/' || true)
           fi
-          file "$EXIF_TGZ" | grep -qi 'gzip compressed data' || { echo "ERROR: exiftool tar.gz invalid"; exit 1; }
+          if [ -z "${EXIF_VER:-}" ]; then
+            echo "Nie udało się ustalić wersji exiftool – spróbuję GitHub Releases…"
+          fi
+
+          EXIF_TGZ=""
+          if [ -n "${EXIF_VER:-}" ]; then
+            # 1) exiftool.org
+            CAND1="https://exiftool.org/Image-ExifTool-${EXIF_VER}.tar.gz"
+            echo "Próba: $CAND1"
+            curl -fsSL "$CAND1" -o downloads/exiftool.tar.gz || true
+            if file downloads/exiftool.tar.gz | grep -qi 'gzip compressed data'; then
+              EXIF_TGZ="downloads/exiftool.tar.gz"
+            else
+              # 2) SourceForge mirror tej samej wersji
+              CAND2="https://downloads.sourceforge.net/project/exiftool/Image-ExifTool-${EXIF_VER}.tar.gz"
+              echo "Próba: $CAND2"
+              curl -fsSL "$CAND2" -o downloads/exiftool.tar.gz || true
+              if file downloads/exiftool.tar.gz | grep -qi 'gzip compressed data'; then
+                EXIF_TGZ="downloads/exiftool.tar.gz"
+              fi
+            end
+          fi
+
+          if [ -z "$EXIF_TGZ" ]; then
+            # 3) GitHub Releases: weź pierwszy .tar.gz asset
+            EXIF_API="https://api.github.com/repos/exiftool/exiftool/releases/latest"
+            GH_TGZ=$(curl -sSL "$EXIF_API" | jq -r '.assets[]?.browser_download_url | select(endswith(".tar.gz"))' | head -n1)
+            [ -n "$GH_TGZ" ] || { echo "ERROR: brak assetów exiftool (.tar.gz) w GitHub Releases"; exit 1; }
+            curl -fsSL "$GH_TGZ" -o downloads/exiftool.tar.gz
+            file downloads/exiftool.tar.gz | grep -qi 'gzip compressed data' || { echo "ERROR: exiftool tar.gz invalid"; exit 1; }
+            EXIF_TGZ="downloads/exiftool.tar.gz"
+          fi
+
           mkdir -p downloads/exiftool
           tar -xzf "$EXIF_TGZ" -C downloads/exiftool --strip-components=1
-          # skrypt + cały katalog lib (potrzebny w runtime)
+          # skrypt + cały katalog lib (Perl) → obok binarek CLI
           cp downloads/exiftool/exiftool tools/exiftool
           chmod +x tools/exiftool
           if [ -d downloads/exiftool/lib ]; then
             mkdir -p tools/lib
             rsync -a downloads/exiftool/lib/ tools/lib/
-          else
-            echo "WARNING: exiftool lib/ not found"
           fi
 
           # ---------- dvdauthor ----------
@@ -204,7 +233,6 @@ jobs:
 
           mkdir -p "out/${APP_NAME}.app/Contents/Resources/bin"
           cp -R "res/bin/." "out/${APP_NAME}.app/Contents/Resources/bin/"
-          # exiftool potrzebuje lib/ w tym samym katalogu — trafiło jako res/bin/lib
           if [ -d "tools/realesrgan-models" ]; then
             mkdir -p "out/${APP_NAME}.app/Contents/Resources/realesrgan-models"
             cp -R "tools/realesrgan-models/." "out/${APP_NAME}.app/Contents/Resources/realesrgan-models/"
