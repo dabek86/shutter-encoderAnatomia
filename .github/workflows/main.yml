@@ -268,26 +268,29 @@ jobs:
           echo "tsMuxer zbudowany ze źródeł"
 
       - name: Get bmxtranswrap (build from BBC repo)
-        run: |
-          set -euo pipefail
-          mkdir -p downloads tools
+  run: |
+    set -euo pipefail
+    mkdir -p downloads tools
 
-          echo ">> bbc/bmx (build)"
-          rm -rf downloads/bmx-src downloads/bmx-build
-          git clone --depth=1 https://github.com/bbc/bmx.git downloads/bmx-src
+    echo ">> bbc/bmx (build)"
+    rm -rf downloads/bmx-src downloads/bmx-build
+    git clone --depth=1 https://github.com/bbc/bmx.git downloads/bmx-src
 
-          # pkg-config widzi Homebrew’owe .pc (uriparser, expat)
-          export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+    # Upewnij się, że pkg-config widzi Homebrew’owe .pc (uriparser, expat)
+    export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
-          cmake -S downloads/bmx-src -B downloads/bmx-build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          ninja -C downloads/bmx-build
+    cmake -S downloads/bmx-src -B downloads/bmx-build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+    ninja -C downloads/bmx-build
 
-          BIN=$( (find downloads/bmx-build -type f -perm +111 -name "bmxtranswrap" 2>/dev/null || true) | head -n1 )
-          [ -n "${BIN:-}" ] || { echo "Nie znaleziono bmxtranswrap po buildzie"; exit 1; }
+    BIN=$( (find downloads/bmx-build -type f -perm +111 -name "bmxtranswrap" 2>/dev/null || true) | head -n1 )
+    [ -n "${BIN:-}" ] || { echo "Nie znaleziono bmxtranswrap po buildzie"; exit 1; }
 
-          cp "$BIN" tools/bmxtranswrap
-          chmod +x tools/bmxtranswrap
-          echo "bmxtranswrap gotowy"
+    cp "$BIN" tools/bmxtranswrap
+    chmod +x tools/bmxtranswrap
+    echo "bmxtranswrap gotowy"
+
 
       - name: Build .app with jpackage + custom JRE + tools
         run: |
