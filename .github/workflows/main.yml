@@ -25,6 +25,7 @@ jobs:
           brew update
           brew install --cask temurin || true
 
+          # Instaluj tylko brakujące formuły
           need_install() { brew list --versions "$1" >/dev/null 2>&1 || brew install "$1"; }
 
           need_install jq
@@ -36,7 +37,9 @@ jobs:
           need_install automake
           need_install libtool
           need_install expat
+          need_install uriparser
 
+          # cmake może być z innego tappa – użyj istniejącej instalacji
           if ! command -v cmake >/dev/null 2>&1; then
             brew install cmake
           else
@@ -212,22 +215,21 @@ jobs:
           mkdir -p downloads tools
 
           echo ">> bbc/bmx (build)"
-          # zależności mamy już w Prepare toolchain: cmake, ninja, expat, pkg-config
           rm -rf downloads/bmx-src downloads/bmx-build
           git clone --depth=1 https://github.com/bbc/bmx.git downloads/bmx-src
 
-          # standardowy build narzędzi, w tym bmxtranswrap
+          # pkg-config widzi Homebrew’owe .pc (uriparser, expat)
+          export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
           cmake -S downloads/bmx-src -B downloads/bmx-build -G Ninja -DCMAKE_BUILD_TYPE=Release
           ninja -C downloads/bmx-build
 
-          # znajdź wygenerowaną binarkę bmxtranswrap
           BIN=$( (find downloads/bmx-build -type f -perm +111 -name "bmxtranswrap" 2>/dev/null || true) | head -n1 )
           [ -n "${BIN:-}" ] || { echo "Nie znaleziono bmxtranswrap po buildzie"; exit 1; }
 
           cp "$BIN" tools/bmxtranswrap
           chmod +x tools/bmxtranswrap
-
-          echo "bmxtranswrap gotowy: $(tools/bmxtranswrap -h >/dev/null 2>&1 && echo OK || echo 'sprawdzono')"
+          echo "bmxtranswrap gotowy"
 
       - name: Build .app with jpackage + custom JRE + tools
         run: |
