@@ -1,4 +1,4 @@
-name: Build macOS PKG (embedded JRE + GitHub tools)
+name: Build macOS PKG (embedded JRE + GitHub tools, robust)
 
 on:
   push:
@@ -22,79 +22,131 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Temurin JDK + jq
+      - name: Install Temurin JDK + tools
         run: |
           brew update
           brew install --cask temurin
-          brew install jq
+          brew install jq coreutils
 
-      - name: Download all CLI tools from GitHub
+      - name: Download all CLI tools (robust selectors)
         run: |
           set -euo pipefail
           mkdir -p downloads tools
 
-          fetch_bin () {
-            local url="$1" out="$2"
-            echo ">> Pobieram $out"
-            curl -L "$url" -o "tools/$out"
-            chmod +x "tools/$out"
-          }
-
-          fetch_zip () {
-            local url="$1" name="$2" pattern="$3"
-            echo ">> Pobieram $name"
-            curl -L "$url" -o "downloads/$name.zip"
-            ditto -x -k "downloads/$name.zip" "downloads/$name" || true
-            BIN=$(find "downloads/$name" -type f -perm +111 -name "$pattern" 2>/dev/null | head -n1)
-            if [ -n "$BIN" ]; then
-              cp "$BIN" "tools/$name"
-              chmod +x "tools/$name"
-            else
-              echo "Nie znaleziono pliku $pattern w $name" >&2
+          require_zip () {
+            local f="$1"
+            if ! file "$f" | grep -qi 'Zip archive'; then
+              echo "ERROR: $f nie jest ZIP-em"; exit 1
             fi
           }
 
-          # ffmpeg (yt-dlp build)
-          fetch_zip "https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-macos64-gpl.zip" ffmpeg ffmpeg
+          unzip_first_exec () {
+            local zip="$1" outdir="$2" pattern="$3" outname="$4"
+            require_zip "$zip"
+            rm -rf "$outdir"; mkdir -p "$outdir"
+            ditto -x -k "$zip" "$outdir"
+            local bin
+            bin=$(find "$outdir" -type f -perm +111 -name "$pattern" 2>/dev/null | head -n1 || true)
+            if [ -z "${bin:-}" ]; then
+              # czasem pliki nie mają +x
+              bin=$(find "$outdir" -type f -name "$pattern" 2>/dev/null | head -n1 || true)
+              [ -n "${bin:-}" ] && chmod +x "$bin"
+            fi
+            [ -n "${bin:-}" ] || { echo "Nie znaleziono $pattern w $zip"; exit 1; }
+            cp "$bin" "tools/$outname"
+            chmod +x "tools/$outname"
+          }
 
-          # yt-dlp
-          fetch_bin "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" yt-dlp
+          # ---------- FFmpeg (Evermeet: stabilne ZIP/API) ----------
+          echo ">> FFmpeg (Evermeet)"
+          curl -sSL "https://evermeet.cx/ffmpeg/get/zip" -o downloads/ffmpeg.zip
+          require_zip downloads/ffmpeg.zip
+          unzip_first_exec downloads/ffmpeg.zip downloads/ffmpeg ffmpeg ffmpeg
 
-          # 7za
-          curl -L "https://github.com/ip7z/7zip/releases/latest/download/7z2301-mac.tar.xz" -o downloads/7zip.tar.xz
-          mkdir -p downloads/7zip && tar -xJf downloads/7zip.tar.xz -C downloads/7zip
-          cp downloads/7zip/7za tools/7za && chmod +x tools/7za
+          # ---------- yt-dlp (pojedynczy plik) ----------
+          echo ">> yt-dlp"
+          curl -sSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" -o tools/yt-dlp
+          chmod +x tools/yt-dlp
 
-          # dcraw
-          fetch_bin "https://raw.githubusercontent.com/entz/dcraw-mac/master/dcraw" dcraw
+          # ---------- 7za ----------
+          echo ">> 7za"
+          curl -sSL "https://github.com/ip7z/7zip/releases/latest/download/7z2301-mac.tar.xz" -o downloads/7zip.tar.xz
+          mkdir -p downloads/7zip
+          tar -xJf downloads/7zip.tar.xz -C downloads/7zip
+          cp downloads/7zip/7za tools/7za
+          chmod +x tools/7za
 
-          # exiftool
-          curl -L "https://exiftool.org/Image-ExifTool-12.76.tar.gz" -o downloads/exiftool.tar.gz
-          mkdir -p downloads/exiftool && tar -xzf downloads/exiftool.tar.gz -C downloads/exiftool --strip-components=1
-          cp downloads/exiftool/exiftool tools/exiftool && chmod +x tools/exiftool
+          # ---------- dcraw (gotowa binarka macOS) ----------
+          echo ">> dcraw"
+          curl -sSL "https://raw.githubusercontent.com/entz/dcraw-mac/master/dcraw" -o tools/dcraw
+          chmod +x tools/dcraw
 
-          # dvdauthor
-          fetch_zip "https://downloads.sourceforge.net/project/dvdauthor/dvdauthor/0.7.2/dvdauthor-0.7.2-macos.zip" dvdauthor dvdauthor
+          # ---------- exiftool (skrypt perl) ----------
+          echo ">> exiftool"
+          curl -sSL "https://exiftool.org/Image-ExifTool-12.76.tar.gz" -o downloads/exiftool.tar.gz
+          mkdir -p downloads/exiftool
+          tar -xzf downloads/exiftool.tar.gz -C downloads/exiftool --strip-components=1
+          cp downloads/exiftool/exiftool tools/exiftool
+          chmod +x tools/exiftool
 
-          # tsMuxer
-          fetch_zip "https://github.com/justdan96/tsMuxer/releases/latest/download/tsMuxer-mac.zip" tsmuxer tsMuxer
+          # ---------- dvdauthor (binarny ZIP macOS) ----------
+          echo ">> dvdauthor"
+          curl -sSL "https://downloads.sourceforge.net/project/dvdauthor/dvdauthor/0.7.2/dvdauthor-0.7.2-macos.zip" -o downloads/dvdauthor.zip
+          unzip_first_exec downloads/dvdauthor.zip downloads/dvdauthor dvdauthor dvdauthor
 
-          # bmxtranswrap
-          fetch_zip "https://downloads.sourceforge.net/project/bmxlib/bmx/bmx-0.2.4/bmx-0.2.4-macosx.zip" bmxtranswrap bmxtranswrap
-
-          # realesrgan-ncnn-vulkan
-          fetch_zip "https://github.com/xinntao/Real-ESRGAN/releases/latest/download/realesrgan-ncnn-vulkan-20220424-macos.zip" realesrgan-ncnn-vulkan realesrgan-ncnn-vulkan
-          if [ -d "downloads/realesrgan-ncnn-vulkan/models" ]; then
-            mkdir -p tools/realesrgan-models
-            cp -R downloads/realesrgan-ncnn-vulkan/models/* tools/realesrgan-models/
+          # ---------- tsMuxer (GitHub API: wybór assetu dla macOS) ----------
+          echo ">> tsMuxer"
+          TS_API="https://api.github.com/repos/justdan96/tsMuxer/releases/latest"
+          TS_URL=$(curl -sSL "$TS_API" | jq -r '.assets[]?.browser_download_url
+                    | select(test("mac|osx|darwin";"i"))
+                    | select(endswith(".zip") or endswith(".dmg"))' | head -n1)
+          [ -n "$TS_URL" ] || { echo "Brak assetu tsMuxer dla macOS"; exit 1; }
+          if echo "$TS_URL" | grep -qi '\.zip$'; then
+            curl -sSL "$TS_URL" -o downloads/tsmuxer.zip
+            unzip_first_exec downloads/tsmuxer.zip downloads/tsmuxer 'tsmuxer|tsMuxeR' tsmuxer
+          else
+            curl -sSL "$TS_URL" -o downloads/tsmuxer.dmg
+            MNT=$(mktemp -d)
+            hdiutil attach downloads/tsmuxer.dmg -mountpoint "$MNT" -nobrowse -quiet
+            CAND=$(find "$MNT" -type f -perm +111 -name "tsmuxer" -o -name "tsMuxeR" 2>/dev/null | head -n1 || true)
+            [ -n "${CAND:-}" ] || { echo "Nie znaleziono binarki w DMG tsMuxer"; hdiutil detach "$MNT" -quiet; exit 1; }
+            cp "$CAND" tools/tsmuxer && chmod +x tools/tsmuxer
+            hdiutil detach "$MNT" -quiet
           fi
 
-          # mediainfo
-          curl -L "https://mediaarea.net/download/binary/mediainfo/23.12/MediaInfo_CLI_23.12_Mac.dmg" -o downloads/mediainfo.dmg
+          # ---------- bmxtranswrap (SourceForge ZIP) ----------
+          echo ">> bmxtranswrap"
+          curl -sSL "https://downloads.sourceforge.net/project/bmxlib/bmx/bmx-0.2.4/bmx-0.2.4-macosx.zip" -o downloads/bmx.zip
+          unzip_first_exec downloads/bmx.zip downloads/bmx bmxtranswrap bmxtranswrap
+
+          # ---------- Real-ESRGAN NCNN Vulkan (GitHub release ZIP + modele) ----------
+          echo ">> Real-ESRGAN ncnn Vulkan"
+          RG_API="https://api.github.com/repos/xinntao/Real-ESRGAN-ncnn-vulkan/releases/latest"
+          RG_URL=$(curl -sSL "$RG_API" | jq -r '.assets[]?.browser_download_url
+                    | select(test("mac|osx";"i"))
+                    | select(endswith(".zip"))' | head -n1)
+          [ -n "$RG_URL" ] || RG_URL="https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan/releases/download/v0.2.0/realesrgan-ncnn-vulkan-v0.2.0-macos.zip"
+          curl -sSL "$RG_URL" -o downloads/realesrgan.zip
+          require_zip downloads/realesrgan.zip
+          rm -rf downloads/realesrgan; mkdir -p downloads/realesrgan
+          ditto -x -k downloads/realesrgan.zip downloads/realesrgan
+          BIN_RG=$(find downloads/realesrgan -type f -perm +111 -name "realesrgan-ncnn-vulkan" 2>/dev/null | head -n1 || true)
+          [ -n "${BIN_RG:-}" ] || { echo "Nie znaleziono binarki realesrgan-ncnn-vulkan"; exit 1; }
+          cp "$BIN_RG" tools/realesrgan-ncnn-vulkan && chmod +x tools/realesrgan-ncnn-vulkan
+          if [ -d "downloads/realesrgan/models" ]; then
+            mkdir -p tools/realesrgan-models
+            cp -R downloads/realesrgan/models/* tools/realesrgan-models/ || true
+          fi
+
+          # ---------- MediaInfo CLI (oficjalny DMG) ----------
+          echo ">> MediaInfo CLI"
+          MI_URL="https://mediaarea.net/download/binary/mediainfo/25.07/MediaInfo_CLI_25.07_Mac.dmg"
+          curl -sSL "$MI_URL" -o downloads/mediainfo.dmg
           MNT=$(mktemp -d)
           hdiutil attach downloads/mediainfo.dmg -mountpoint "$MNT" -nobrowse -quiet
-          cp "$MNT/MediaInfo_CLI_23.12_Mac/mediainfo" tools/mediainfo
-          chmod +x tools/mediainfo
+          CAND=$(find "$MNT" -type f -name "mediainfo" -perm +111 2>/dev/null | head -n1 || true)
+          [ -n "${CAND:-}" ] || { echo "Nie znaleziono mediainfo w DMG"; hdiutil detach "$MNT" -quiet; exit 1; }
+          cp "$CAND" tools/mediainfo && chmod +x tools/mediainfo
           hdiutil detach "$MNT" -quiet
 
       - name: Build .app with jpackage + custom JRE + tools
