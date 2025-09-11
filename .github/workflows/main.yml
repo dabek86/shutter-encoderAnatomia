@@ -96,13 +96,33 @@ jobs:
           curl -sSL "https://raw.githubusercontent.com/entz/dcraw-mac/master/dcraw" -o tools/dcraw
           chmod +x tools/dcraw
 
-          # ---------- exiftool ----------
+          # ---------- exiftool (GitHub Releases: tar.gz lub DMG) ----------
           echo ">> exiftool"
-          curl -sSL "https://exiftool.org/Image-ExifTool-12.76.tar.gz" -o downloads/exiftool.tar.gz
-          mkdir -p downloads/exiftool
-          tar -xzf downloads/exiftool.tar.gz -C downloads/exiftool --strip-components=1
-          cp downloads/exiftool/exiftool tools/exiftool
-          chmod +x tools/exiftool
+          EXIF_API="https://api.github.com/repos/exiftool/exiftool/releases/latest"
+          EXIF_TGZ=$(curl -sSL "$EXIF_API" | jq -r '.assets[]?.browser_download_url | select(endswith(".tar.gz"))' | head -n1)
+          EXIF_DMG=$(curl -sSL "$EXIF_API" | jq -r '.assets[]?.browser_download_url | select(endswith(".dmg"))' | head -n1)
+          if [ -n "$EXIF_TGZ" ]; then
+            curl -sSL "$EXIF_TGZ" -o downloads/exiftool.tar.gz
+            mkdir -p downloads/exiftool
+            tar -xzf downloads/exiftool.tar.gz -C downloads/exiftool --strip-components=1
+            cp downloads/exiftool/exiftool tools/exiftool
+            chmod +x tools/exiftool
+          elif [ -n "$EXIF_DMG" ]; then
+            curl -sSL "$EXIF_DMG" -o downloads/exiftool.dmg
+            MNT=$(mktemp -d)
+            hdiutil attach downloads/exiftool.dmg -mountpoint "$MNT" -nobrowse -quiet
+            CAND=$(find "$MNT" -type f -name "exiftool" -perm +111 2>/dev/null | head -n1 || true)
+            if [ -z "${CAND:-}" ]; then
+              # Na macOS DMG często zawiera pakiet instalacyjny; spróbuj skryptu w aplikacji ExifTool(-k)
+              CAND=$(find "$MNT" -type f -name "exiftool(-k)" -o -name "exiftool" 2>/dev/null | head -n1 || true)
+            fi
+            [ -n "${CAND:-}" ] || { echo "Nie znaleziono exiftool w DMG"; hdiutil detach "$MNT" -quiet; exit 1; }
+            cp "$CAND" tools/exiftool
+            chmod +x tools/exiftool
+            hdiutil detach "$MNT" -quiet
+          else
+            echo "ERROR: brak assetów exiftool (.tar.gz/.dmg) w GitHub Releases"; exit 1
+          fi
 
           # ---------- dvdauthor ----------
           echo ">> dvdauthor"
