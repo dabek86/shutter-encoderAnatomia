@@ -1,4 +1,4 @@
-name: Build macOS PKG
+name: Build macOS PKG (with embedded JRE)
 
 on:
   push:
@@ -10,9 +10,11 @@ jobs:
     runs-on: macos-latest
 
     env:
-      APP_NAME: "Shutter Encoder Anatomia"              # Twoja nazwa app
-      APP_VERSION: "19.4.0"                             # ← podmień
-      PKG_IDENTIFIER: "pl.dabek86.shutterencoder"       # ← podmień
+      APP_NAME: "Shutter Encoder Anatomia"              # ← nazwa aplikacji (.app)
+      APP_VERSION: "19.4.0"                             # ← PODMIEŃ na swoją wersję
+      PKG_IDENTIFIER: "pl.dabek86.shutterencoder"       # ← PODMIEŃ na swój reverse-DNS
+
+      # Przełączniki zależne od sekretów — jeśli brak, kroki się pominą
       SHOULD_SIGN: ${{ secrets.INSTALLER_CERT_P12 && secrets.INSTALLER_CERT_P12_PASSWORD && 'true' || 'false' }}
       CAN_NOTARIZE_API: ${{ secrets.NOTARY_API_KEY_ID && secrets.NOTARY_API_ISSUER && secrets.NOTARY_API_KEY && 'true' || 'false' }}
       CAN_NOTARIZE_APPLEID: ${{ secrets.APPLE_ID && secrets.TEAM_ID && secrets.APP_SPECIFIC_PW && 'true' || 'false' }}
@@ -21,29 +23,36 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Temurin JDK (for jpackage)
+      - name: Install Temurin JDK (jlink/jpackage)
         run: |
           brew update
           brew install --cask temurin
 
-      - name: Build .app with jpackage (NO self-inclusion)
+      - name: Build .app with jpackage + custom JRE (jlink)
         run: |
           set -euo pipefail
-          # 1) Czyścimy output
-          rm -rf out && mkdir -p out
 
-          # 2) Tworzymy staging tylko z JAR-em głównym
-          rm -rf stage && mkdir -p stage
+          # 0) Porządkowanie katalogów
+          rm -rf out stage res JRE
+          mkdir -p out stage res
+
+          # 1) Staging: tylko główny JAR do --input
           cp "Shutter Encoder.jar" stage/
 
-          # 3) Zasoby do osobnego katalogu res/ (BEZ out/, .git itd.)
-          rm -rf res && mkdir -p res
-          # kopiujemy tylko to, co potrzebne
+          # 2) Zasoby do --resource-dir (BEZ out/, .git itd.)
           [ -d Library ] && rsync -a --delete --exclude '.DS_Store' Library/ res/Library/ || true
           [ -d fonts ]   && rsync -a --delete --exclude '.DS_Store' fonts/   res/fonts/   || true
-          # UWAGA: Nie kopiujemy out/ do res/! (domyślnie go tu nie ma)
 
-          # 4) Generujemy app-image - input to WYŁĄCZNIE stage/
+          # 3) Budowa minimalnego JRE (dokładnie jak podałeś)
+          jlink \
+            --compress 0 \
+            --strip-debug \
+            --no-header-files \
+            --no-man-pages \
+            --add-modules java.base,java.datatransfer,java.desktop,java.logging,java.security.sasl,java.xml,jdk.crypto.ec \
+            --output JRE
+
+          # 4) Generacja app-image z wbudowanym JRE
           jpackage \
             --type app-image \
             --name "${APP_NAME}" \
@@ -51,11 +60,12 @@ jobs:
             --input stage \
             --main-jar "Shutter Encoder.jar" \
             --resource-dir res \
+            --runtime-image JRE \
             --dest out
 
-          # out/${APP_NAME}.app gotowe
+          # out/${APP_NAME}.app gotowe (z runtime w środku)
 
-      - name: Prepare payload
+      - name: Prepare payload for PKG
         run: |
           mkdir -p "payload/Applications"
           cp -R "out/${APP_NAME}.app" "payload/Applications/${APP_NAME}.app"
@@ -91,7 +101,8 @@ jobs:
             --version "${APP_VERSION}" \
             "${APP_NAME}-unsigned.pkg"
 
-      - name: Import Developer ID Installer certificate (optional)
+      # ====== OPCJONALNIE: Podpis ======
+      - name: Import Developer ID Installer certificate
         if: env.SHOULD_SIGN == 'true'
         run: |
           echo "${{ secrets.INSTALLER_CERT_P12 }}" | base64 --decode > installer.p12
@@ -102,17 +113,20 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k temp build.keychain
           rm -f installer.p12
 
-      - name: Sign installer (optional)
+      - name: Sign installer (productsign)
         if: env.SHOULD_SIGN == 'true'
         env:
-          INSTALLER_CN: "Developer ID Installer: YOUR NAME (TEAMID)"   # ← PODMIEŃ
+          # PODMIEŃ na pełną nazwę certyfikatu jak w Keychain, np.:
+          # Developer ID Installer: Imię Nazwisko (TEAMID)
+          INSTALLER_CN: "Developer ID Installer: YOUR NAME (TEAMID)"
         run: |
           productsign \
             --sign "${INSTALLER_CN}" \
             "${APP_NAME}-unsigned.pkg" \
             "${APP_NAME}-signed.pkg"
 
-      - name: Notarize with notarytool (API key) (optional)
+      # ====== OPCJONALNIE: Notaryzacja ======
+      - name: Notarize with notarytool (API key)
         if: env.CAN_NOTARIZE_API == 'true'
         env:
           NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
@@ -127,7 +141,7 @@ jobs:
             --wait
           rm -f api_key.p8
 
-      - name: Notarize with notarytool (Apple ID) (optional)
+      - name: Notarize with notarytool (Apple ID)
         if: env.CAN_NOTARIZE_APPLEID == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -140,7 +154,7 @@ jobs:
             --password "$APP_SPECIFIC_PW" \
             --wait
 
-      - name: Staple (optional)
+      - name: Staple ticket (optional)
         run: |
           PKG="$([ -f "${APP_NAME}-signed.pkg" ] && echo "${APP_NAME}-signed.pkg" || echo "${APP_NAME}-unsigned.pkg")"
           xcrun stapler staple "$PKG" || true
