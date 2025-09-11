@@ -94,7 +94,6 @@ jobs:
           echo ">> exiftool"
           EXIF_VER=$(curl -fsSL "https://exiftool.org/ver.txt" | tr -d '\r' || true)
           if [ -z "${EXIF_VER:-}" ]; then
-            # awaryjnie spróbuj wyciągnąć nazwę z HTML
             EXIF_VER=$(curl -fsSL "https://exiftool.org/" | grep -Eo 'Image-ExifTool-[0-9]+\.[0-9]+\.tar\.gz' | head -n1 | sed -E 's/.*Image-ExifTool-([0-9]+\.[0-9]+)\.tar\.gz/\1/' || true)
           fi
           if [ -z "${EXIF_VER:-}" ]; then
@@ -117,7 +116,7 @@ jobs:
               if file downloads/exiftool.tar.gz | grep -qi 'gzip compressed data'; then
                 EXIF_TGZ="downloads/exiftool.tar.gz"
               fi
-            end
+            fi
           fi
 
           if [ -z "$EXIF_TGZ" ]; then
