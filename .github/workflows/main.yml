@@ -1,4 +1,4 @@
-name: Build macOS PKG (embedded JRE + tools)
+name: Build macOS PKG (embedded JRE + GitHub tools)
 
 on:
   push:
@@ -14,7 +14,6 @@ jobs:
       APP_VERSION: "19.4.0"                       # ← PODMIEŃ
       PKG_IDENTIFIER: "pl.dabek86.shutterencoder" # ← PODMIEŃ
 
-      # Automatyczne flagi — aktywują podpis / notaryzację tylko jeśli dodasz sekrety
       SHOULD_SIGN: ${{ secrets.INSTALLER_CERT_P12 && secrets.INSTALLER_CERT_P12_PASSWORD && 'true' || 'false' }}
       CAN_NOTARIZE_API: ${{ secrets.NOTARY_API_KEY_ID && secrets.NOTARY_API_ISSUER && secrets.NOTARY_API_KEY && 'true' || 'false' }}
       CAN_NOTARIZE_APPLEID: ${{ secrets.APPLE_ID && secrets.TEAM_ID && secrets.APP_SPECIFIC_PW && 'true' || 'false' }}
@@ -23,79 +22,80 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Temurin JDK (jlink/jpackage)
+      - name: Install Temurin JDK + jq
         run: |
           brew update
           brew install --cask temurin
+          brew install jq
 
-      - name: Install CLI tools via Homebrew (bez bmx/tsmuxer)
-        run: |
-          set -euo pipefail
-          brew install jq ffmpeg p7zip exiftool dcraw yt-dlp dvdauthor realesrgan-ncnn-vulkan
-          brew install --cask mediainfo
-
-      - name: Fetch tsMuxer + bmxtranswrap manually
+      - name: Download all CLI tools from GitHub
         run: |
           set -euo pipefail
           mkdir -p downloads tools
 
-          # === tsMuxer z GitHub Releases ===
-          API_URL="https://api.github.com/repos/justdan96/tsMuxer/releases/latest"
-          ASSET_URL=$(curl -sL "$API_URL" | jq -r '.assets[]?.browser_download_url | select(test("mac|osx|darwin"; "i"))' | head -n1)
-          if [ -z "$ASSET_URL" ]; then
-            echo "Nie znaleziono assetu tsMuxer dla macOS." >&2
-            exit 1
-          fi
-          echo "Pobieram tsMuxer: $ASSET_URL"
-          curl -L "$ASSET_URL" -o downloads/tsmuxer-asset.zip
-          ditto -x -k downloads/tsmuxer-asset.zip downloads/tsmuxer || true
-          BIN_TSMUXER=$(find downloads/tsmuxer -type f -perm +111 -name "tsmuxer" -o -name "tsMuxeR" 2>/dev/null | head -n1)
-          if [ -n "$BIN_TSMUXER" ]; then
-            cp "$BIN_TSMUXER" tools/tsmuxer && chmod +x tools/tsmuxer
-          else
-            echo "Nie znaleziono binarki tsMuxer" >&2; exit 1
-          fi
+          fetch_bin () {
+            local url="$1" out="$2"
+            echo ">> Pobieram $out"
+            curl -L "$url" -o "tools/$out"
+            chmod +x "tools/$out"
+          }
 
-          # === bmxtranswrap z SourceForge (binarka macOS Intel) ===
-          echo "Pobieram bmxtranswrap..."
-          curl -L "https://downloads.sourceforge.net/project/bmxlib/bmx/bmx-0.2.4/bmx-0.2.4-macosx.zip" -o downloads/bmx.zip
-          ditto -x -k downloads/bmx.zip downloads/bmx || true
-          BIN_BMX=$(find downloads/bmx -type f -perm +111 -name "bmxtranswrap" 2>/dev/null | head -n1)
-          if [ -n "$BIN_BMX" ]; then
-            cp "$BIN_BMX" tools/bmxtranswrap && chmod +x tools/bmxtranswrap
-          else
-            echo "Nie znaleziono binarki bmxtranswrap" >&2; exit 1
-          fi
-
-      - name: Collect Homebrew tools into ./tools (binaries + optional models)
-        run: |
-          set -euo pipefail
-
-          copy_bin () {
-            if command -v "$1" >/dev/null 2>&1; then
-              cp "$(command -v "$1")" "tools/$1"
-              chmod +x "tools/$1"
-              echo "Copied $1 -> tools/$1"
+          fetch_zip () {
+            local url="$1" name="$2" pattern="$3"
+            echo ">> Pobieram $name"
+            curl -L "$url" -o "downloads/$name.zip"
+            ditto -x -k "downloads/$name.zip" "downloads/$name" || true
+            BIN=$(find "downloads/$name" -type f -perm +111 -name "$pattern" 2>/dev/null | head -n1)
+            if [ -n "$BIN" ]; then
+              cp "$BIN" "tools/$name"
+              chmod +x "tools/$name"
             else
-              echo "WARNING: $1 not found in PATH" >&2
+              echo "Nie znaleziono pliku $pattern w $name" >&2
             fi
           }
 
-          copy_bin ffmpeg
-          copy_bin 7za
-          copy_bin exiftool
-          copy_bin dcraw
-          copy_bin yt-dlp
-          copy_bin dvdauthor
-          copy_bin mediainfo
-          copy_bin realesrgan-ncnn-vulkan
+          # ffmpeg (yt-dlp build)
+          fetch_zip "https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-macos64-gpl.zip" ffmpeg ffmpeg
 
-          # Modele Real-ESRGAN (jeśli zainstalowane przez brew)
-          BREW_PREFIX=$(brew --prefix)
-          if [ -d "$BREW_PREFIX/share/realesrgan-ncnn-vulkan" ]; then
+          # yt-dlp
+          fetch_bin "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" yt-dlp
+
+          # 7za
+          curl -L "https://github.com/ip7z/7zip/releases/latest/download/7z2301-mac.tar.xz" -o downloads/7zip.tar.xz
+          mkdir -p downloads/7zip && tar -xJf downloads/7zip.tar.xz -C downloads/7zip
+          cp downloads/7zip/7za tools/7za && chmod +x tools/7za
+
+          # dcraw
+          fetch_bin "https://raw.githubusercontent.com/entz/dcraw-mac/master/dcraw" dcraw
+
+          # exiftool
+          curl -L "https://exiftool.org/Image-ExifTool-12.76.tar.gz" -o downloads/exiftool.tar.gz
+          mkdir -p downloads/exiftool && tar -xzf downloads/exiftool.tar.gz -C downloads/exiftool --strip-components=1
+          cp downloads/exiftool/exiftool tools/exiftool && chmod +x tools/exiftool
+
+          # dvdauthor
+          fetch_zip "https://downloads.sourceforge.net/project/dvdauthor/dvdauthor/0.7.2/dvdauthor-0.7.2-macos.zip" dvdauthor dvdauthor
+
+          # tsMuxer
+          fetch_zip "https://github.com/justdan96/tsMuxer/releases/latest/download/tsMuxer-mac.zip" tsmuxer tsMuxer
+
+          # bmxtranswrap
+          fetch_zip "https://downloads.sourceforge.net/project/bmxlib/bmx/bmx-0.2.4/bmx-0.2.4-macosx.zip" bmxtranswrap bmxtranswrap
+
+          # realesrgan-ncnn-vulkan
+          fetch_zip "https://github.com/xinntao/Real-ESRGAN/releases/latest/download/realesrgan-ncnn-vulkan-20220424-macos.zip" realesrgan-ncnn-vulkan realesrgan-ncnn-vulkan
+          if [ -d "downloads/realesrgan-ncnn-vulkan/models" ]; then
             mkdir -p tools/realesrgan-models
-            rsync -a "$BREW_PREFIX/share/realesrgan-ncnn-vulkan/" tools/realesrgan-models/
+            cp -R downloads/realesrgan-ncnn-vulkan/models/* tools/realesrgan-models/
           fi
+
+          # mediainfo
+          curl -L "https://mediaarea.net/download/binary/mediainfo/23.12/MediaInfo_CLI_23.12_Mac.dmg" -o downloads/mediainfo.dmg
+          MNT=$(mktemp -d)
+          hdiutil attach downloads/mediainfo.dmg -mountpoint "$MNT" -nobrowse -quiet
+          cp "$MNT/MediaInfo_CLI_23.12_Mac/mediainfo" tools/mediainfo
+          chmod +x tools/mediainfo
+          hdiutil detach "$MNT" -quiet
 
       - name: Build .app with jpackage + custom JRE + tools
         run: |
@@ -103,20 +103,13 @@ jobs:
           rm -rf out stage res JRE
           mkdir -p out stage res
 
-          # 1) Główny JAR do --input
           cp "Shutter Encoder.jar" stage/
+          [ -d Library ] && rsync -a Library/ res/Library/ || true
+          [ -d fonts ] && rsync -a fonts/ res/fonts/ || true
 
-          # 2) Zasoby do --resource-dir
-          [ -d Library ] && rsync -a --delete --exclude '.DS_Store' Library/ res/Library/ || true
-          [ -d fonts ]   && rsync -a --delete --exclude '.DS_Store' fonts/   res/fonts/   || true
+          mkdir -p res/bin
+          rsync -a tools/ res/bin/
 
-          # 3) Dołącz narzędzia CLI jako bin/
-          if [ -d tools ]; then
-            mkdir -p res/bin
-            rsync -a tools/ res/bin/
-          fi
-
-          # 4) Minimalny JRE przez jlink (Twoje moduły)
           jlink \
             --compress 0 \
             --strip-debug \
@@ -125,7 +118,6 @@ jobs:
             --add-modules java.base,java.datatransfer,java.desktop,java.logging,java.security.sasl,java.xml,jdk.crypto.ec \
             --output JRE
 
-          # 5) app-image (JRE w środku)
           jpackage \
             --type app-image \
             --name "${APP_NAME}" \
@@ -136,11 +128,8 @@ jobs:
             --runtime-image JRE \
             --dest out
 
-          # 6) Przenieś bin/ i modele do konwencjonalnego miejsca w bundle
-          if [ -d "res/bin" ]; then
-            mkdir -p "out/${APP_NAME}.app/Contents/Resources/bin"
-            cp -R "res/bin/." "out/${APP_NAME}.app/Contents/Resources/bin/"
-          fi
+          mkdir -p "out/${APP_NAME}.app/Contents/Resources/bin"
+          cp -R "res/bin/." "out/${APP_NAME}.app/Contents/Resources/bin/"
           if [ -d "tools/realesrgan-models" ]; then
             mkdir -p "out/${APP_NAME}.app/Contents/Resources/realesrgan-models"
             cp -R "tools/realesrgan-models/." "out/${APP_NAME}.app/Contents/Resources/realesrgan-models/"
@@ -151,31 +140,7 @@ jobs:
           mkdir -p "payload/Applications"
           cp -R "out/${APP_NAME}.app" "payload/Applications/${APP_NAME}.app"
 
-      - name: Compute payload stats
-        id: stats
-        run: |
-          FILES=$(find payload -type f | wc -l | tr -d ' ')
-          KBYTES=$(du -sk payload | awk '{print $1}')
-          echo "files=$FILES" >> "$GITHUB_OUTPUT"
-          echo "kbytes=$KBYTES" >> "$GITHUB_OUTPUT"
-
-      - name: Create PackageInfo (minimal)
-        run: |
-          cat > PackageInfo <<'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <pkg-info format-version="2"
-            identifier="${PKG_IDENTIFIER}"
-            version="${APP_VERSION}"
-            install-location="/"
-            auth="root">
-            <payload installKBytes="${{ steps.stats.outputs.kbytes }}" numberOfFiles="${{ steps.stats.outputs.files }}"/>
-            <scripts/>
-          </pkg-info>
-          EOF
-          sed -i '' "s|\${PKG_IDENTIFIER}|${PKG_IDENTIFIER}|g" PackageInfo
-          sed -i '' "s|\${APP_VERSION}|${APP_VERSION}|g" PackageInfo
-
-      - name: Build component package (pkgbuild)
+      - name: Build .pkg
         run: |
           pkgbuild \
             --root payload \
@@ -184,70 +149,8 @@ jobs:
             --version "${APP_VERSION}" \
             "${APP_NAME}-unsigned.pkg"
 
-      # ====== (OPCJONALNIE) PODPIS ======
-      - name: Import Developer ID Installer certificate
-        if: env.SHOULD_SIGN == 'true'
-        run: |
-          echo "${{ secrets.INSTALLER_CERT_P12 }}" | base64 --decode > installer.p12
-          security create-keychain -p temp build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p temp build.keychain
-          security import installer.p12 -k build.keychain -P "${{ secrets.INSTALLER_CERT_P12_PASSWORD }}" -T /usr/bin/productsign -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s -k temp build.keychain
-          rm -f installer.p12
-
-      - name: Sign installer (productsign)
-        if: env.SHOULD_SIGN == 'true'
-        env:
-          INSTALLER_CN: "Developer ID Installer: YOUR NAME (TEAMID)"   # ← PODMIEŃ
-        run: |
-          productsign \
-            --sign "${INSTALLER_CN}" \
-            "${APP_NAME}-unsigned.pkg" \
-            "${APP_NAME}-signed.pkg"
-
-      # ====== (OPCJONALNIE) NOTARYZACJA ======
-      - name: Notarize with notarytool (API key)
-        if: env.CAN_NOTARIZE_API == 'true'
-        env:
-          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
-          NOTARY_API_ISSUER: ${{ secrets.NOTARY_API_ISSUER }}
-          NOTARY_API_KEY: ${{ secrets.NOTARY_API_KEY }}
-        run: |
-          echo "$NOTARY_API_KEY" > api_key.p8
-          xcrun notarytool submit "$([ -f "${APP_NAME}-signed.pkg" ] && echo "${APP_NAME}-signed.pkg" || echo "${APP_NAME}-unsigned.pkg")" \
-            --key api_key.p8 \
-            --key-id "$NOTARY_API_KEY_ID" \
-            --issuer "$NOTARY_API_ISSUER" \
-            --wait
-          rm -f api_key.p8
-
-      - name: Notarize with notarytool (Apple ID)
-        if: env.CAN_NOTARIZE_APPLEID == 'true'
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          TEAM_ID: ${{ secrets.TEAM_ID }}
-          APP_SPECIFIC_PW: ${{ secrets.APP_SPECIFIC_PW }}
-        run: |
-          xcrun notarytool submit "$([ -f "${APP_NAME}-signed.pkg" ] && echo "${APP_NAME}-signed.pkg" || echo "${APP_NAME}-unsigned.pkg")" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$TEAM_ID" \
-            --password "$APP_SPECIFIC_PW" \
-            --wait
-
-      - name: Staple ticket (optional)
-        run: |
-          PKG="$([ -f "${APP_NAME}-signed.pkg" ] && echo "${APP_NAME}-signed.pkg" || echo "${APP_NAME}-unsigned.pkg")"
-          xcrun stapler staple "$PKG" || true
-
-      - name: Prepare final artifact
-        run: |
-          mkdir -p dist
-          PKG="$([ -f "${APP_NAME}-signed.pkg" ] && echo "${APP_NAME}-signed.pkg" || echo "${APP_NAME}-unsigned.pkg")"
-          mv "$PKG" "dist/${APP_NAME}-${APP_VERSION}.pkg"
-
-      - name: Upload final PKG (versioned)
+      - name: Upload final PKG
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.APP_NAME }}-${{ env.APP_VERSION }}
-          path: dist/*.pkg
+          path: "${{ env.APP_NAME }}-unsigned.pkg"
