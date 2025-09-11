@@ -151,7 +151,7 @@ jobs:
           cp "$BIN" tools/mediainfo
           chmod +x tools/mediainfo
 
-      - name: Get tsMuxer (robust: GitHub API with token + source build fallback)
+      - name: "Get tsMuxer (robust: GitHub API with token + source build fallback)"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
