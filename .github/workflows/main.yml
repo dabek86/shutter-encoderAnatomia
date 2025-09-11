@@ -206,73 +206,28 @@ jobs:
             cp "$BIN" tools/tsmuxer && chmod +x tools/tsmuxer
           fi
 
-      - name: Get bmxtranswrap (ZIP from SF mirrors or build from source)
+      - name: Get bmxtranswrap (build from BBC repo)
         run: |
           set -euo pipefail
           mkdir -p downloads tools
 
-          echo ">> bmxtranswrap"
-          BMX_REL="project/bmxlib/bmx/bmx-0.2.4/bmx-0.2.4-macosx.zip"
-          OUT="downloads/bmx.zip"
-          mirrors=(
-            "downloads.sourceforge.net"
-            "pilotfiber.dl.sourceforge.net"
-            "netactuate.dl.sourceforge.net"
-            "phoenixnap.dl.sourceforge.net"
-            "versaweb.dl.sourceforge.net"
-            "gigenet.dl.sourceforge.net"
-            "ayera.dl.sourceforge.net"
-            "kumisystems.dl.sourceforge.net"
-          )
-          got_zip="false"
-          for m in "${mirrors[@]}"; do
-            URL="https://${m}/${BMX_REL}"
-            echo "  próbuję: $URL"
-            curl -fsSL "$URL" -o "$OUT" || true
-            if [ -f "$OUT" ] && file "$OUT" | grep -qi 'Zip archive'; then
-              echo "  OK z: $m"
-              got_zip="true"
-              break
-            else
-              rm -f "$OUT"
-            fi
-          done
-
-          if [ "$got_zip" = "true" ]; then
-            rm -rf downloads/bmx
-            mkdir -p downloads/bmx
-            ditto -x -k "$OUT" downloads/bmx
-            CAND=$(find downloads/bmx -type f -perm +111 -name "bmxtranswrap" 2>/dev/null | head -n1 || true)
-            if [ -z "${CAND:-}" ]; then
-              CAND=$(find downloads/bmx -type f -name "bmxtranswrap" 2>/dev/null | head -n1 || true)
-              [ -n "${CAND:-}" ] && chmod +x "$CAND"
-            fi
-            [ -n "${CAND:-}" ] || { echo "Nie znaleziono bmxtranswrap w ZIP — przechodzę do builda ze źródeł"; got_zip="false"; }
-            if [ "$got_zip" = "true" ]; then
-              cp "$CAND" tools/bmxtranswrap
-              chmod +x tools/bmxtranswrap
-              exit 0
-            fi
-          fi
-
-          echo "Buduję bmx ze źródeł…"
+          echo ">> bbc/bmx (build)"
+          # zależności mamy już w Prepare toolchain: cmake, ninja, expat, pkg-config
           rm -rf downloads/bmx-src downloads/bmx-build
-          if ! git clone --depth=1 https://git.code.sf.net/p/bmxlib/code downloads/bmx-src; then
-            git clone --depth=1 https://github.com/bmx-team/bmx downloads/bmx-src || true
-          fi
-          [ -d downloads/bmx-src ] || { echo "Nie udało się sklonować źródeł bmx"; exit 1; }
+          git clone --depth=1 https://github.com/bbc/bmx.git downloads/bmx-src
 
-          if [ -f downloads/bmx-src/CMakeLists.txt ]; then
-            cmake -S downloads/bmx-src -B downloads/bmx-build -G Ninja -DCMAKE_BUILD_TYPE=Release
-            ninja -C downloads/bmx-build
-          else
-            (cd downloads/bmx-src && (./bootstrap || true) && (./configure || true) && make -j2 || true)
-          fi
+          # standardowy build narzędzi, w tym bmxtranswrap
+          cmake -S downloads/bmx-src -B downloads/bmx-build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          ninja -C downloads/bmx-build
 
-          BIN=$( (find downloads/bmx-build downloads/bmx-src -type f -perm +111 -name "bmxtranswrap" 2>/dev/null || true) | head -n1 )
-          [ -n "${BIN:-}" ] || { echo "Nie udało się pozyskać bmxtranswrap"; exit 1; }
+          # znajdź wygenerowaną binarkę bmxtranswrap
+          BIN=$( (find downloads/bmx-build -type f -perm +111 -name "bmxtranswrap" 2>/dev/null || true) | head -n1 )
+          [ -n "${BIN:-}" ] || { echo "Nie znaleziono bmxtranswrap po buildzie"; exit 1; }
+
           cp "$BIN" tools/bmxtranswrap
           chmod +x tools/bmxtranswrap
+
+          echo "bmxtranswrap gotowy: $(tools/bmxtranswrap -h >/dev/null 2>&1 && echo OK || echo 'sprawdzono')"
 
       - name: Build .app with jpackage + custom JRE + tools
         run: |
