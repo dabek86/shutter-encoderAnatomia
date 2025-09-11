@@ -1,8 +1,8 @@
-name: Build macOS PKG (embedded JRE + bundled CLI tools)
+name: Build macOS PKG (embedded JRE + tools)
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
@@ -10,11 +10,11 @@ jobs:
     runs-on: macos-latest
 
     env:
-      APP_NAME: "Shutter Encoder Anatomia"          # nazwa pakietu .app
-      APP_VERSION: "19.4.0"                         # ← PODMIEŃ
-      PKG_IDENTIFIER: "pl.dabek86.shutterencoder"   # ← PODMIEŃ (reverse-DNS)
+      APP_NAME: "Shutter Encoder Anatomia"
+      APP_VERSION: "19.4.0"                  # <- PODMIEŃ
+      PKG_IDENTIFIER: "pl.dabek86.shutterencoder"  # <- PODMIEŃ
 
-      # Te flagi same włączą się, jeśli dodasz odpowiednie sekrety
+      # Te flagi włączą kroki podpisu/notaryzacji tylko jeśli dodasz sekrety
       SHOULD_SIGN: ${{ secrets.INSTALLER_CERT_P12 && secrets.INSTALLER_CERT_P12_PASSWORD && 'true' || 'false' }}
       CAN_NOTARIZE_API: ${{ secrets.NOTARY_API_KEY_ID && secrets.NOTARY_API_ISSUER && secrets.NOTARY_API_KEY && 'true' || 'false' }}
       CAN_NOTARIZE_APPLEID: ${{ secrets.APPLE_ID && secrets.TEAM_ID && secrets.APP_SPECIFIC_PW && 'true' || 'false' }}
@@ -23,7 +23,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Temurin JDK (for jlink/jpackage)
+      - name: Install Temurin JDK (jlink/jpackage)
         run: |
           brew update
           brew install --cask temurin
@@ -31,17 +31,15 @@ jobs:
       - name: Install CLI tools via Homebrew
         run: |
           set -euo pipefail
-          # Zestaw narzędzi:
-          # ffmpeg, 7za (z p7zip), exiftool, dcraw, yt-dlp, dvdauthor, tsmuxer, mediainfo, bmx (z bmxtranswrap), realesrgan-ncnn-vulkan
           brew install ffmpeg p7zip exiftool dcraw yt-dlp dvdauthor tsmuxer mediainfo bmx realesrgan-ncnn-vulkan
 
-      - name: Collect tools into ./tools (binaries + optional model files)
+      - name: Collect tools into ./tools (binaries + optional models)
         run: |
           set -euo pipefail
           rm -rf tools && mkdir -p tools
 
-          copy_bin () { 
-            if command -v "$1" >/dev/null 2>&1; then 
+          copy_bin () {
+            if command -v "$1" >/dev/null 2>&1; then
               cp "$(command -v "$1")" "tools/$1"
               chmod +x "tools/$1"
               echo "Copied $1 -> tools/$1"
@@ -50,7 +48,6 @@ jobs:
             fi
           }
 
-          # Binarne nazwy
           copy_bin ffmpeg
           copy_bin 7za
           copy_bin exiftool
@@ -62,37 +59,32 @@ jobs:
           copy_bin bmxtranswrap
           copy_bin realesrgan-ncnn-vulkan
 
-          # Dodatkowe zasoby modeli (jeśli formuła je zainstalowała)
-          # Real-ESRGAN NCNN: modele bywają w .../share/realesrgan-ncnn-vulkan/models
           BREW_PREFIX=$(brew --prefix)
           if [ -d "$BREW_PREFIX/share/realesrgan-ncnn-vulkan" ]; then
             mkdir -p tools/realesrgan-models
             rsync -a "$BREW_PREFIX/share/realesrgan-ncnn-vulkan/" tools/realesrgan-models/
-            echo "Copied Real-ESRGAN NCNN models."
           fi
 
       - name: Build .app with jpackage + custom JRE + tools
         run: |
           set -euo pipefail
-
-          # 0) Porządek
           rm -rf out stage res JRE
           mkdir -p out stage res
 
-          # 1) Staging: tylko główny JAR (do --input)
+          # 1) Główny JAR do --input
           cp "Shutter Encoder.jar" stage/
 
-          # 2) Zasoby (Library, fonts)
+          # 2) Zasoby do --resource-dir
           [ -d Library ] && rsync -a --delete --exclude '.DS_Store' Library/ res/Library/ || true
           [ -d fonts ]   && rsync -a --delete --exclude '.DS_Store' fonts/   res/fonts/   || true
 
-          # 3) Dołączamy narzędzia CLI jako bin/ (trafią do Contents/Resources/bin po przeniesieniu)
+          # 3) Dołącz narzędzia CLI jako bin/
           if [ -d tools ]; then
             mkdir -p res/bin
             rsync -a tools/ res/bin/
           fi
 
-          # 4) Minimalny JRE przez jlink (Twój zestaw modułów)
+          # 4) Minimalny JRE przez jlink (moduły jak podałeś)
           jlink \
             --compress 0 \
             --strip-debug \
@@ -101,7 +93,7 @@ jobs:
             --add-modules java.base,java.datatransfer,java.desktop,java.logging,java.security.sasl,java.xml,jdk.crypto.ec \
             --output JRE
 
-          # 5) Generujemy app-image (JRE w środku)
+          # 5) app-image (JRE w środku)
           jpackage \
             --type app-image \
             --name "${APP_NAME}" \
@@ -112,13 +104,11 @@ jobs:
             --runtime-image JRE \
             --dest out
 
-          # 6) Konwencjonalne miejsce na narzędzia: Contents/Resources/bin
-          # (jpackage umieszcza res/ jako Contents/app/*, dlatego przenosimy bin/ do Resources)
+          # 6) Przenieś bin/ i modele do konwencjonalnego miejsca
           if [ -d "res/bin" ]; then
             mkdir -p "out/${APP_NAME}.app/Contents/Resources/bin"
             cp -R "res/bin/." "out/${APP_NAME}.app/Contents/Resources/bin/"
           fi
-          # Jeśli są modele Real-ESRGAN — też wrzućmy je do Resources
           if [ -d "tools/realesrgan-models" ]; then
             mkdir -p "out/${APP_NAME}.app/Contents/Resources/realesrgan-models"
             cp -R "tools/realesrgan-models/." "out/${APP_NAME}.app/Contents/Resources/realesrgan-models/"
@@ -134,12 +124,12 @@ jobs:
         run: |
           FILES=$(find payload -type f | wc -l | tr -d ' ')
           KBYTES=$(du -sk payload | awk '{print $1}')
-          echo "files=$FILES" >> $GITHUB_OUTPUT
-          echo "kbytes=$KBYTES" >> $GITHUB_OUTPUT
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          echo "kbytes=$KBYTES" >> "$GITHUB_OUTPUT"
 
       - name: Create PackageInfo (minimal)
         run: |
-          cat > PackageInfo <<EOF
+          cat > PackageInfo <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <pkg-info format-version="2"
             identifier="${PKG_IDENTIFIER}"
@@ -150,6 +140,9 @@ jobs:
             <scripts/>
           </pkg-info>
           EOF
+          # Podmień zmienne środowiskowe w pliku:
+          sed -i '' "s|\${PKG_IDENTIFIER}|${PKG_IDENTIFIER}|g" PackageInfo
+          sed -i '' "s|\${APP_VERSION}|${APP_VERSION}|g" PackageInfo
 
       - name: Build component package (pkgbuild)
         run: |
@@ -160,7 +153,7 @@ jobs:
             --version "${APP_VERSION}" \
             "${APP_NAME}-unsigned.pkg"
 
-      # ========= (OPCJONALNIE) PODPIS =========
+      # ====== OPCJONALNIE: Podpis ======
       - name: Import Developer ID Installer certificate
         if: env.SHOULD_SIGN == 'true'
         run: |
@@ -175,15 +168,14 @@ jobs:
       - name: Sign installer (productsign)
         if: env.SHOULD_SIGN == 'true'
         env:
-          # Podmień na dokładną nazwę certyfikatu w Keychain:
-          INSTALLER_CN: "Developer ID Installer: YOUR NAME (TEAMID)"
+          INSTALLER_CN: "Developer ID Installer: YOUR NAME (TEAMID)"   # <- PODMIEŃ
         run: |
           productsign \
             --sign "${INSTALLER_CN}" \
             "${APP_NAME}-unsigned.pkg" \
             "${APP_NAME}-signed.pkg"
 
-      # ========= (OPCJONALNIE) NOTARYZACJA =========
+      # ====== OPCJONALNIE: Notaryzacja ======
       - name: Notarize with notarytool (API key)
         if: env.CAN_NOTARIZE_API == 'true'
         env:
@@ -217,16 +209,7 @@ jobs:
           PKG="$([ -f "${APP_NAME}-signed.pkg" ] && echo "${APP_NAME}-signed.pkg" || echo "${APP_NAME}-unsigned.pkg")"
           xcrun stapler staple "$PKG" || true
 
-       - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: pkg
-          path: |
-            ${APP_NAME}-signed.pkg
-            ${APP_NAME}-unsigned.pkg
-            dist/*.pkg
-
-      - name: Prepare final artifact in /dist
+      - name: Prepare final artifact
         run: |
           mkdir -p dist
           PKG="$([ -f "${APP_NAME}-signed.pkg" ] && echo "${APP_NAME}-signed.pkg" || echo "${APP_NAME}-unsigned.pkg")"
@@ -235,5 +218,5 @@ jobs:
       - name: Upload final PKG (versioned)
         uses: actions/upload-artifact@v4
         with:
-          name: ${APP_NAME}-${APP_VERSION}
+          name: ${{ env.APP_NAME }}-${{ env.APP_VERSION }}
           path: dist/*.pkg
