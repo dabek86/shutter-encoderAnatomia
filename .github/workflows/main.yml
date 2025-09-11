@@ -56,7 +56,7 @@ jobs:
             chmod +x "tools/$outname"
           }
 
-          # ---------- FFmpeg (Evermeet: stabilne ZIP/API) ----------
+          # ---------- FFmpeg (Evermeet) ----------
           echo ">> FFmpeg (Evermeet)"
           curl -sSL "https://evermeet.cx/ffmpeg/get/zip" -o downloads/ffmpeg.zip
           require_zip downloads/ffmpeg.zip
@@ -67,61 +67,48 @@ jobs:
           curl -sSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" -o tools/yt-dlp
           chmod +x tools/yt-dlp
 
-          # ---------- 7za (oficjalne 7-Zip.org: binarka 7zz) ----------
+          # ---------- 7za (7-zip.org: 7zz → 7za) ----------
           echo ">> 7za (7-zip.org)"
           mkdir -p downloads/7zip
           Z7_URL_PRIMARY="https://www.7-zip.org/a/7z2408-mac.tar.xz"
           Z7_URL_FALLBACK="https://www.7-zip.org/a/7z2301-mac.tar.xz"
-
           curl -sSL "$Z7_URL_PRIMARY" -o downloads/7zip.tar.xz || true
           if ! file downloads/7zip.tar.xz | grep -qi 'XZ compressed data'; then
             echo "Primary 7zip URL failed, trying fallback…"
             curl -sSL "$Z7_URL_FALLBACK" -o downloads/7zip.tar.xz
           fi
-
           if ! file downloads/7zip.tar.xz | grep -qi 'XZ compressed data'; then
             echo "ERROR: 7zip tar.xz is not valid"; exit 1
           fi
-
           tar -xJf downloads/7zip.tar.xz -C downloads/7zip
-          if [ -f downloads/7zip/7zz ]; then
-            cp downloads/7zip/7zz tools/7za
-            chmod +x tools/7za
-          else
-            echo "ERROR: 7zz not found in 7zip package"; exit 1
-          fi
+          [ -f downloads/7zip/7zz ] || { echo "ERROR: 7zz not found"; exit 1; }
+          cp downloads/7zip/7zz tools/7za
+          chmod +x tools/7za
 
           # ---------- dcraw ----------
           echo ">> dcraw"
           curl -sSL "https://raw.githubusercontent.com/entz/dcraw-mac/master/dcraw" -o tools/dcraw
           chmod +x tools/dcraw
 
-          # ---------- exiftool (GitHub Releases: tar.gz lub DMG) ----------
+          # ---------- exiftool (tar.gz z exiftool.org z fallbackiem na SourceForge) ----------
           echo ">> exiftool"
-          EXIF_API="https://api.github.com/repos/exiftool/exiftool/releases/latest"
-          EXIF_TGZ=$(curl -sSL "$EXIF_API" | jq -r '.assets[]?.browser_download_url | select(endswith(".tar.gz"))' | head -n1)
-          EXIF_DMG=$(curl -sSL "$EXIF_API" | jq -r '.assets[]?.browser_download_url | select(endswith(".dmg"))' | head -n1)
-          if [ -n "$EXIF_TGZ" ]; then
-            curl -sSL "$EXIF_TGZ" -o downloads/exiftool.tar.gz
-            mkdir -p downloads/exiftool
-            tar -xzf downloads/exiftool.tar.gz -C downloads/exiftool --strip-components=1
-            cp downloads/exiftool/exiftool tools/exiftool
-            chmod +x tools/exiftool
-          elif [ -n "$EXIF_DMG" ]; then
-            curl -sSL "$EXIF_DMG" -o downloads/exiftool.dmg
-            MNT=$(mktemp -d)
-            hdiutil attach downloads/exiftool.dmg -mountpoint "$MNT" -nobrowse -quiet
-            CAND=$(find "$MNT" -type f -name "exiftool" -perm +111 2>/dev/null | head -n1 || true)
-            if [ -z "${CAND:-}" ]; then
-              # Na macOS DMG często zawiera pakiet instalacyjny; spróbuj skryptu w aplikacji ExifTool(-k)
-              CAND=$(find "$MNT" -type f -name "exiftool(-k)" -o -name "exiftool" 2>/dev/null | head -n1 || true)
-            fi
-            [ -n "${CAND:-}" ] || { echo "Nie znaleziono exiftool w DMG"; hdiutil detach "$MNT" -quiet; exit 1; }
-            cp "$CAND" tools/exiftool
-            chmod +x tools/exiftool
-            hdiutil detach "$MNT" -quiet
+          EXIF_TGZ="downloads/exiftool.tar.gz"
+          curl -fsSL "https://exiftool.org/Image-ExifTool-12.76.tar.gz" -o "$EXIF_TGZ" || true
+          if ! file "$EXIF_TGZ" | grep -qi 'gzip compressed data'; then
+            echo "Primary exiftool URL failed, trying SourceForge…"
+            curl -fsSL "https://downloads.sourceforge.net/project/exiftool/Image-ExifTool-12.76.tar.gz" -o "$EXIF_TGZ"
+          fi
+          file "$EXIF_TGZ" | grep -qi 'gzip compressed data' || { echo "ERROR: exiftool tar.gz invalid"; exit 1; }
+          mkdir -p downloads/exiftool
+          tar -xzf "$EXIF_TGZ" -C downloads/exiftool --strip-components=1
+          # skrypt + cały katalog lib (potrzebny w runtime)
+          cp downloads/exiftool/exiftool tools/exiftool
+          chmod +x tools/exiftool
+          if [ -d downloads/exiftool/lib ]; then
+            mkdir -p tools/lib
+            rsync -a downloads/exiftool/lib/ tools/lib/
           else
-            echo "ERROR: brak assetów exiftool (.tar.gz/.dmg) w GitHub Releases"; exit 1
+            echo "WARNING: exiftool lib/ not found"
           fi
 
           # ---------- dvdauthor ----------
@@ -217,6 +204,7 @@ jobs:
 
           mkdir -p "out/${APP_NAME}.app/Contents/Resources/bin"
           cp -R "res/bin/." "out/${APP_NAME}.app/Contents/Resources/bin/"
+          # exiftool potrzebuje lib/ w tym samym katalogu — trafiło jako res/bin/lib
           if [ -d "tools/realesrgan-models" ]; then
             mkdir -p "out/${APP_NAME}.app/Contents/Resources/realesrgan-models"
             cp -R "tools/realesrgan-models/." "out/${APP_NAME}.app/Contents/Resources/realesrgan-models/"
