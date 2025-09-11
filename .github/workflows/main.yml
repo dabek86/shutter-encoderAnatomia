@@ -11,10 +11,10 @@ jobs:
 
     env:
       APP_NAME: "Shutter Encoder Anatomia"
-      APP_VERSION: "19.4.0"                  # <- PODMIEŃ
-      PKG_IDENTIFIER: "pl.dabek86.shutterencoder"  # <- PODMIEŃ
+      APP_VERSION: "19.4.0"                       # ← PODMIEŃ
+      PKG_IDENTIFIER: "pl.dabek86.shutterencoder" # ← PODMIEŃ
 
-      # Te flagi włączą kroki podpisu/notaryzacji tylko jeśli dodasz sekrety
+      # Włączą się same, jeśli dodasz sekrety
       SHOULD_SIGN: ${{ secrets.INSTALLER_CERT_P12 && secrets.INSTALLER_CERT_P12_PASSWORD && 'true' || 'false' }}
       CAN_NOTARIZE_API: ${{ secrets.NOTARY_API_KEY_ID && secrets.NOTARY_API_ISSUER && secrets.NOTARY_API_KEY && 'true' || 'false' }}
       CAN_NOTARIZE_APPLEID: ${{ secrets.APPLE_ID && secrets.TEAM_ID && secrets.APP_SPECIFIC_PW && 'true' || 'false' }}
@@ -28,16 +28,76 @@ jobs:
           brew update
           brew install --cask temurin
 
-      - name: Install CLI tools via Homebrew
+      - name: Install CLI tools via Homebrew (bez tsmuxer)
         run: |
           set -euo pipefail
-          brew install ffmpeg p7zip exiftool dcraw yt-dlp dvdauthor tsmuxer mediainfo bmx realesrgan-ncnn-vulkan
+          # + jq do parsowania API GitHuba (dla tsMuxer)
+          brew install jq ffmpeg p7zip exiftool dcraw yt-dlp dvdauthor mediainfo bmx realesrgan-ncnn-vulkan
 
-      - name: Collect tools into ./tools (binaries + optional models)
+      - name: Fetch tsMuxer from GitHub Releases
         run: |
           set -euo pipefail
-          rm -rf tools && mkdir -p tools
+          mkdir -p downloads tools
+          # Pobierz najnowsze release i wybierz asset dla macOS (prefer ARM64 / universal)
+          API_URL="https://api.github.com/repos/justdan96/tsMuxer/releases/latest"
+          ASSET_URL=$(
+            curl -sL "$API_URL" \
+            | jq -r '
+                .assets
+                | map(select(
+                    (.name|test("mac|osx|darwin"; "i")) and
+                    ((.name|test("arm64|aarch64|universal"; "i")) or (.name|test("mac|osx|darwin"; "i")))
+                  ))
+                | sort_by(.name)
+                | reverse
+                | .[0].browser_download_url // empty
+              '
+          )
+          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
+            echo "Nie znaleziono assetu tsMuxer dla macOS w najnowszym release." >&2
+            exit 1
+          fi
+          echo "Pobieram: $ASSET_URL"
+          FILENAME="downloads/tsmuxer-asset"
+          curl -L "$ASSET_URL" -o "$FILENAME"
 
+          # Rozpakuj różne możliwe formaty
+          # Obsłuż .zip / .dmg / samodzielny bin
+          if file "$FILENAME" | grep -qi 'Zip archive'; then
+            ditto -x -k "$FILENAME" downloads/tsmuxer
+          elif file "$FILENAME" | grep -qi 'application/x-apple-diskimage'; then
+            MNT=$(mktemp -d)
+            hdiutil attach "$FILENAME" -mountpoint "$MNT" -nobrowse -quiet
+            # Spróbuj znaleźć binarkę CLI (zwykle "tsmuxer" lub "tsMuxeR")
+            cp -Rv "$MNT"/* downloads/tsmuxer/ || true
+            hdiutil detach "$MNT" -quiet
+          else
+            # Może to być bezpośrednio binarka
+            mkdir -p downloads/tsmuxer
+            cp "$FILENAME" downloads/tsmuxer/tsmuxer || true
+            cp "$FILENAME" downloads/tsmuxer/tsMuxeR || true
+          fi
+
+          # Znormalizuj nazwę i skopiuj do tools/
+          # Szukamy wykonywalnego pliku o nazwie tsmuxer lub tsMuxeR
+          BIN_PATH=$( (find downloads/tsmuxer -type f -perm +111 -name "tsmuxer" -o -name "tsMuxeR" 2>/dev/null || true) | head -n1 )
+          if [ -z "$BIN_PATH" ]; then
+            # jeśli nic nie znaleziono, spróbuj szerzej
+            BIN_PATH=$( (find downloads/tsmuxer -type f -perm +111 2>/dev/null || true) | grep -i "tsmux" | head -n1 )
+          fi
+          if [ -z "$BIN_PATH" ]; then
+            echo "Nie udało się zlokalizować binarki tsMuxer po rozpakowaniu." >&2
+            ls -la downloads/tsmuxer || true
+            exit 1
+          fi
+          echo "Znaleziono tsMuxer: $BIN_PATH"
+          cp "$BIN_PATH" tools/tsmuxer
+          chmod +x tools/tsmuxer
+
+      - name: Collect other tools into ./tools (binaries + optional models)
+        run: |
+          set -euo pipefail
+          # Dokładamy binarki z Homebrew do ./tools
           copy_bin () {
             if command -v "$1" >/dev/null 2>&1; then
               cp "$(command -v "$1")" "tools/$1"
@@ -54,11 +114,11 @@ jobs:
           copy_bin dcraw
           copy_bin yt-dlp
           copy_bin dvdauthor
-          copy_bin tsmuxer
           copy_bin mediainfo
           copy_bin bmxtranswrap
           copy_bin realesrgan-ncnn-vulkan
 
+          # Modele Real-ESRGAN (jeśli zainstalowane przez brew)
           BREW_PREFIX=$(brew --prefix)
           if [ -d "$BREW_PREFIX/share/realesrgan-ncnn-vulkan" ]; then
             mkdir -p tools/realesrgan-models
@@ -84,7 +144,7 @@ jobs:
             rsync -a tools/ res/bin/
           fi
 
-          # 4) Minimalny JRE przez jlink (moduły jak podałeś)
+          # 4) Minimalny JRE przez jlink (Twoje moduły)
           jlink \
             --compress 0 \
             --strip-debug \
@@ -104,7 +164,7 @@ jobs:
             --runtime-image JRE \
             --dest out
 
-          # 6) Przenieś bin/ i modele do konwencjonalnego miejsca
+          # 6) Przenieś bin/ i modele do konwencjonalnego miejsca w bundle
           if [ -d "res/bin" ]; then
             mkdir -p "out/${APP_NAME}.app/Contents/Resources/bin"
             cp -R "res/bin/." "out/${APP_NAME}.app/Contents/Resources/bin/"
@@ -140,7 +200,6 @@ jobs:
             <scripts/>
           </pkg-info>
           EOF
-          # Podmień zmienne środowiskowe w pliku:
           sed -i '' "s|\${PKG_IDENTIFIER}|${PKG_IDENTIFIER}|g" PackageInfo
           sed -i '' "s|\${APP_VERSION}|${APP_VERSION}|g" PackageInfo
 
@@ -153,7 +212,7 @@ jobs:
             --version "${APP_VERSION}" \
             "${APP_NAME}-unsigned.pkg"
 
-      # ====== OPCJONALNIE: Podpis ======
+      # ====== (OPCJONALNIE) PODPIS ======
       - name: Import Developer ID Installer certificate
         if: env.SHOULD_SIGN == 'true'
         run: |
@@ -168,14 +227,14 @@ jobs:
       - name: Sign installer (productsign)
         if: env.SHOULD_SIGN == 'true'
         env:
-          INSTALLER_CN: "Developer ID Installer: YOUR NAME (TEAMID)"   # <- PODMIEŃ
+          INSTALLER_CN: "Developer ID Installer: YOUR NAME (TEAMID)"   # ← PODMIEŃ
         run: |
           productsign \
             --sign "${INSTALLER_CN}" \
             "${APP_NAME}-unsigned.pkg" \
             "${APP_NAME}-signed.pkg"
 
-      # ====== OPCJONALNIE: Notaryzacja ======
+      # ====== (OPCJONALNIE) NOTARYZACJA ======
       - name: Notarize with notarytool (API key)
         if: env.CAN_NOTARIZE_API == 'true'
         env:
