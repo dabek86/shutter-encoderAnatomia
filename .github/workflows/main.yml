@@ -1,4 +1,4 @@
-name: Build macOS PKG (embedded JRE + GitHub tools, robust)
+name: Build macOS PKG (embedded JRE + GitHub tools)
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
           brew install --cask temurin
           brew install jq coreutils
 
-      - name: Download all CLI tools (robust selectors)
+      - name: Download all CLI tools (robust)
         run: |
           set -euo pipefail
           mkdir -p downloads tools
@@ -48,7 +48,6 @@ jobs:
             local bin
             bin=$(find "$outdir" -type f -perm +111 -name "$pattern" 2>/dev/null | head -n1 || true)
             if [ -z "${bin:-}" ]; then
-              # czasem pliki nie mają +x
               bin=$(find "$outdir" -type f -name "$pattern" 2>/dev/null | head -n1 || true)
               [ -n "${bin:-}" ] && chmod +x "$bin"
             fi
@@ -63,25 +62,41 @@ jobs:
           require_zip downloads/ffmpeg.zip
           unzip_first_exec downloads/ffmpeg.zip downloads/ffmpeg ffmpeg ffmpeg
 
-          # ---------- yt-dlp (pojedynczy plik) ----------
+          # ---------- yt-dlp ----------
           echo ">> yt-dlp"
           curl -sSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" -o tools/yt-dlp
           chmod +x tools/yt-dlp
 
-          # ---------- 7za ----------
-          echo ">> 7za"
-          curl -sSL "https://github.com/ip7z/7zip/releases/latest/download/7z2301-mac.tar.xz" -o downloads/7zip.tar.xz
+          # ---------- 7za (oficjalne 7-Zip.org: binarka 7zz) ----------
+          echo ">> 7za (7-zip.org)"
           mkdir -p downloads/7zip
-          tar -xJf downloads/7zip.tar.xz -C downloads/7zip
-          cp downloads/7zip/7za tools/7za
-          chmod +x tools/7za
+          Z7_URL_PRIMARY="https://www.7-zip.org/a/7z2408-mac.tar.xz"
+          Z7_URL_FALLBACK="https://www.7-zip.org/a/7z2301-mac.tar.xz"
 
-          # ---------- dcraw (gotowa binarka macOS) ----------
+          curl -sSL "$Z7_URL_PRIMARY" -o downloads/7zip.tar.xz || true
+          if ! file downloads/7zip.tar.xz | grep -qi 'XZ compressed data'; then
+            echo "Primary 7zip URL failed, trying fallback…"
+            curl -sSL "$Z7_URL_FALLBACK" -o downloads/7zip.tar.xz
+          fi
+
+          if ! file downloads/7zip.tar.xz | grep -qi 'XZ compressed data'; then
+            echo "ERROR: 7zip tar.xz is not valid"; exit 1
+          fi
+
+          tar -xJf downloads/7zip.tar.xz -C downloads/7zip
+          if [ -f downloads/7zip/7zz ]; then
+            cp downloads/7zip/7zz tools/7za
+            chmod +x tools/7za
+          else
+            echo "ERROR: 7zz not found in 7zip package"; exit 1
+          fi
+
+          # ---------- dcraw ----------
           echo ">> dcraw"
           curl -sSL "https://raw.githubusercontent.com/entz/dcraw-mac/master/dcraw" -o tools/dcraw
           chmod +x tools/dcraw
 
-          # ---------- exiftool (skrypt perl) ----------
+          # ---------- exiftool ----------
           echo ">> exiftool"
           curl -sSL "https://exiftool.org/Image-ExifTool-12.76.tar.gz" -o downloads/exiftool.tar.gz
           mkdir -p downloads/exiftool
@@ -89,12 +104,12 @@ jobs:
           cp downloads/exiftool/exiftool tools/exiftool
           chmod +x tools/exiftool
 
-          # ---------- dvdauthor (binarny ZIP macOS) ----------
+          # ---------- dvdauthor ----------
           echo ">> dvdauthor"
           curl -sSL "https://downloads.sourceforge.net/project/dvdauthor/dvdauthor/0.7.2/dvdauthor-0.7.2-macos.zip" -o downloads/dvdauthor.zip
           unzip_first_exec downloads/dvdauthor.zip downloads/dvdauthor dvdauthor dvdauthor
 
-          # ---------- tsMuxer (GitHub API: wybór assetu dla macOS) ----------
+          # ---------- tsMuxer ----------
           echo ">> tsMuxer"
           TS_API="https://api.github.com/repos/justdan96/tsMuxer/releases/latest"
           TS_URL=$(curl -sSL "$TS_API" | jq -r '.assets[]?.browser_download_url
@@ -114,12 +129,12 @@ jobs:
             hdiutil detach "$MNT" -quiet
           fi
 
-          # ---------- bmxtranswrap (SourceForge ZIP) ----------
+          # ---------- bmxtranswrap ----------
           echo ">> bmxtranswrap"
           curl -sSL "https://downloads.sourceforge.net/project/bmxlib/bmx/bmx-0.2.4/bmx-0.2.4-macosx.zip" -o downloads/bmx.zip
           unzip_first_exec downloads/bmx.zip downloads/bmx bmxtranswrap bmxtranswrap
 
-          # ---------- Real-ESRGAN NCNN Vulkan (GitHub release ZIP + modele) ----------
+          # ---------- Real-ESRGAN ----------
           echo ">> Real-ESRGAN ncnn Vulkan"
           RG_API="https://api.github.com/repos/xinntao/Real-ESRGAN-ncnn-vulkan/releases/latest"
           RG_URL=$(curl -sSL "$RG_API" | jq -r '.assets[]?.browser_download_url
@@ -138,7 +153,7 @@ jobs:
             cp -R downloads/realesrgan/models/* tools/realesrgan-models/ || true
           fi
 
-          # ---------- MediaInfo CLI (oficjalny DMG) ----------
+          # ---------- MediaInfo ----------
           echo ">> MediaInfo CLI"
           MI_URL="https://mediaarea.net/download/binary/mediainfo/25.07/MediaInfo_CLI_25.07_Mac.dmg"
           curl -sSL "$MI_URL" -o downloads/mediainfo.dmg
