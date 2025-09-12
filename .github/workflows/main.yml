@@ -19,11 +19,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare toolchain
+      - name: Prepare toolchain (JDK 20)
         run: |
           set -euo pipefail
           brew update
-          brew install --cask temurin || true
+          # JDK 20 (z cask-versions)
+          brew tap homebrew/cask-versions
+          brew install --cask temurin20
+
+          # Ustaw JAVA_HOME/ PATH dla kolejnych kroków
+          export JAVA_HOME="$("/usr/libexec/java_home" -v 20)"
+          echo "JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
+          echo "${JAVA_HOME}/bin" >> "$GITHUB_PATH"
 
           # Instaluj tylko brakujące formuły
           need_install() { brew list --versions "$1" >/dev/null 2>&1 || brew install "$1"; }
@@ -278,6 +285,7 @@ jobs:
 
           # pkg-config widzi Homebrew’owe .pc (uriparser, expat)
           export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+
           cmake -S downloads/bmx-src -B downloads/bmx-build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5
@@ -303,7 +311,8 @@ jobs:
           mkdir -p res/bin
           rsync -a tools/ res/bin/
 
-          jlink \
+          echo "Using JAVA_HOME=$JAVA_HOME"
+          "$JAVA_HOME/bin/jlink" \
             --compress 0 \
             --strip-debug \
             --no-header-files \
@@ -311,7 +320,7 @@ jobs:
             --add-modules java.base,java.datatransfer,java.desktop,java.logging,java.security.sasl,java.xml,jdk.crypto.ec \
             --output JRE
 
-          jpackage \
+          "$JAVA_HOME/bin/jpackage" \
             --type app-image \
             --name "${APP_NAME}" \
             --app-version "${APP_VERSION}" \
