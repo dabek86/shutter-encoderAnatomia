@@ -19,20 +19,48 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare toolchain (JDK 20)
+      # --- JDK 20 bez Homebrew: Adoptium API + fallback ---
+      - name: Install Temurin JDK 20 (Adoptium)
         run: |
           set -euo pipefail
-          brew update
-          # JDK 20 (z cask-versions)
-          brew tap homebrew/cask-versions
-          brew install --cask temurin20
+          ARCH="$(uname -m)"
+          if [ "$ARCH" = "arm64" ]; then ADOP_ARCH="aarch64"; else ADOP_ARCH="x64"; fi
 
-          # Ustaw JAVA_HOME/ PATH dla kolejnych kroków
+          mkdir -p downloads
+          API_URL="https://api.adoptium.net/v3/assets/latest/20/hotspot?architecture=${ADOP_ARCH}&image_type=jdk&os=mac&vendor=eclipse"
+          echo "Fetching Adoptium API: $API_URL"
+          curl -fsSL "$API_URL" -o downloads/adoptium20.json || true
+
+          PKG_URL=""
+          # jq może jeszcze nie być zainstalowane – parsowanie jest opcjonalne
+          if command -v jq >/dev/null 2>&1 && [ -s downloads/adoptium20.json ]; then
+            PKG_URL="$(jq -r '.[0].binaries[0].package.link // empty' downloads/adoptium20.json || true)"
+          fi
+
+          # Fallback na znaną wersję, jeśli API/parsing nie zadziałały
+          if [ -z "${PKG_URL:-}" ] || ! echo "$PKG_URL" | grep -qi '\.pkg$'; then
+            if [ "$ADOP_ARCH" = "aarch64" ]; then
+              PKG_URL="https://github.com/adoptium/temurin20-binaries/releases/download/jdk-20.0.2%2B9/OpenJDK20U-jdk_aarch64_mac_hotspot_20.0.2_9.pkg"
+            else
+              PKG_URL="https://github.com/adoptium/temurin20-binaries/releases/download/jdk-20.0.2%2B9/OpenJDK20U-jdk_x64_mac_hotspot_20.0.2_9.pkg"
+            fi
+          fi
+
+          echo "Downloading JDK 20 PKG: $PKG_URL"
+          curl -fsSL "$PKG_URL" -o downloads/temurin20.pkg
+          sudo installer -pkg downloads/temurin20.pkg -target /
+
+          # Ustaw JAVA_HOME na JDK 20 dla kolejnych kroków
           export JAVA_HOME="$("/usr/libexec/java_home" -v 20)"
           echo "JAVA_HOME=${JAVA_HOME}" >> "$GITHUB_ENV"
           echo "${JAVA_HOME}/bin" >> "$GITHUB_PATH"
+          java -version
 
-          # Instaluj tylko brakujące formuły
+      - name: Prepare toolchain (brew deps)
+        run: |
+          set -euo pipefail
+          brew update
+
           need_install() { brew list --versions "$1" >/dev/null 2>&1 || brew install "$1"; }
 
           need_install jq
@@ -46,7 +74,6 @@ jobs:
           need_install expat
           need_install uriparser
 
-          # cmake może być z innego tappa – użyj istniejącej instalacji
           if ! command -v cmake >/dev/null 2>&1; then
             brew install cmake
           else
@@ -262,7 +289,6 @@ jobs:
           rm -rf downloads/tsmuxer-src downloads/tsmuxer-build
           git clone --depth=1 https://github.com/justdan96/tsMuxer.git downloads/tsmuxer-src
 
-          # CMake: polityki, żeby przejść komunikat o <3.5
           cmake -S downloads/tsmuxer-src -B downloads/tsmuxer-build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5
@@ -283,7 +309,6 @@ jobs:
           rm -rf downloads/bmx-src downloads/bmx-build
           git clone --depth=1 https://github.com/bbc/bmx.git downloads/bmx-src
 
-          # pkg-config widzi Homebrew’owe .pc (uriparser, expat)
           export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
           cmake -S downloads/bmx-src -B downloads/bmx-build -G Ninja \
